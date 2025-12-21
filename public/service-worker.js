@@ -1,5 +1,5 @@
 // Service Worker لـ ZZApp
-const CACHE_NAME = 'zzapp-cache-v4';
+const CACHE_NAME = 'zzapp-cache-v10';
 const urlsToCache = [
   '/',
   '/index.html',
