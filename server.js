@@ -7,6 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const multer = require("multer");
+const fetch = require("node-fetch");
 
 const app = express();
 const server = http.createServer(app);
@@ -20,8 +21,9 @@ app.use(express.urlencoded({ extended: true }));
 const downloadsDir = path.join(__dirname, 'public', 'downloads');
 const uploadsDir = path.join(__dirname, 'public', 'uploads');
 const sessionsDir = path.join(__dirname, '.wwebjs_auth');
+const cacheDir = path.join(__dirname, 'public', 'cache');
 
-[downloadsDir, uploadsDir, sessionsDir].forEach(dir => {
+[downloadsDir, uploadsDir, sessionsDir, cacheDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -44,77 +46,60 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
-      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
-      'video/mp4', 'video/avi', 'video/mkv', 'video/mov', 'video/wmv',
-      'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/aac',
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+      'video/mp4', 'video/avi', 'video/mkv', 'video/mov', 'video/wmv', 'video/flv', 'video/3gp', 'video/webm',
+      'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/aac', 'audio/m4a', 'audio/x-m4a',
       'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'text/plain'
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain', 'application/zip', 'application/x-rar-compressed'
     ];
     
     if (allowedMimes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('نوع الملف غير مدعوم'), false);
+      // التحقق من الصيغ الخاصة
+      const ext = path.extname(file.originalname).toLowerCase();
+      const allowedExts = ['.3gp', '.gp3', '.pg3', '.heic', '.heif'];
+      if (allowedExts.includes(ext)) {
+        cb(null, true);
+      } else {
+        cb(new Error('نوع الملف غير مدعوم'), false);
+      }
     }
   }
 });
 
 /* ================= DATABASE ================= */
-// استخدام قاعدة البيانات البعيدة مع إصلاح SSL
 const getDatabaseConfig = () => {
   const connectionString = process.env.DATABASE_URL || "postgres://postgres:6DQNh71sjOwHWwi5VYvGGZDtx5GpsdXRz6DWQKb7mBy9fwHNTn9X21yAJy05A14v@31.97.47.20:5433/postgres";
   
-  // تحليل connection string
   const url = new URL(connectionString);
-  const config = {
+  return {
     host: url.hostname,
     port: parseInt(url.port) || 5432,
     database: url.pathname.replace('/', ''),
     user: url.username,
     password: url.password,
     ssl: {
-      rejectUnauthorized: false, // إصلاح مشكلة SSL
+      rejectUnauthorized: false,
       require: true
     }
   };
-  
-  console.log(`📊 الاتصال بقاعدة البيانات: ${config.host}:${config.port}`);
-  return config;
 };
 
 const pool = new Pool(getDatabaseConfig());
-
-// اختبار الاتصال بقاعدة البيانات
-async function testDatabaseConnection() {
-  try {
-    const client = await pool.connect();
-    console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
-    
-    // اختبار بسيط
-    const result = await client.query('SELECT NOW() as current_time');
-    console.log(`🕐 وقت قاعدة البيانات: ${result.rows[0].current_time}`);
-    
-    client.release();
-    return true;
-  } catch (error) {
-    console.error('❌ فشل الاتصال بقاعدة البيانات:', error.message);
-    return false;
-  }
-}
 
 // إعداد قاعدة البيانات
 async function setupDatabase() {
   try {
     console.log("🔧 جاري إعداد قاعدة البيانات...");
     
-    // اختبار الاتصال أولاً
-    const connected = await testDatabaseConnection();
-    if (!connected) {
-      console.log("⚠️ تأجيل إعداد قاعدة البيانات حتى يصبح الاتصال متاحاً");
-      return;
-    }
+    // اختبار الاتصال
+    const client = await pool.connect();
+    console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
     
-    // إنشاء الجداول إذا لم تكن موجودة
+    // إنشاء الجداول
     await pool.query(`
       CREATE TABLE IF NOT EXISTS zzapp_sessions (
         id SERIAL PRIMARY KEY,
@@ -129,9 +114,11 @@ async function setupDatabase() {
       CREATE TABLE IF NOT EXISTS zzapp_chats (
         id TEXT PRIMARY KEY,
         name TEXT,
+        display_name TEXT,
         number TEXT,
         about TEXT,
         pic TEXT,
+        pic_cached BOOLEAN DEFAULT false,
         last_message TEXT,
         message_count INTEGER DEFAULT 0,
         unread_count INTEGER DEFAULT 0,
@@ -164,33 +151,19 @@ async function setupDatabase() {
       )
     `);
 
-    // محاولة إنشاء الفهارس
+    // إنشاء الفهارس
     try {
       await pool.query(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_chats_session') THEN
-            CREATE INDEX idx_chats_session ON zzapp_chats(session_id);
-          END IF;
-          
-          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_chat') THEN
-            CREATE INDEX idx_messages_chat ON zzapp_messages(chat_id);
-          END IF;
-          
-          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_session') THEN
-            CREATE INDEX idx_messages_session ON zzapp_messages(session_id);
-          END IF;
-          
-          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_timestamp') THEN
-            CREATE INDEX idx_messages_timestamp ON zzapp_messages(timestamp);
-          END IF;
-        END
-        $$;
+        CREATE INDEX IF NOT EXISTS idx_chats_session ON zzapp_chats(session_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_chat ON zzapp_messages(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_session ON zzapp_messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON zzapp_messages(timestamp);
       `);
     } catch (indexError) {
       console.log("⚠️ خطأ في إنشاء الفهارس:", indexError.message);
     }
 
+    client.release();
     console.log("✅ تم إعداد قاعدة البيانات بنجاح");
   } catch (error) {
     console.error("❌ خطأ في إعداد قاعدة البيانات:", error.message);
@@ -226,6 +199,14 @@ let currentSessionId = null;
 function extractNumberFromId(contactId) {
   if (!contactId) return "غير معروف";
   
+  if (contactId.includes('@g.us')) {
+    return "مجموعة";
+  }
+  
+  if (contactId.includes('@lid')) {
+    return "جهة اتصال";
+  }
+  
   let number = contactId
     .replace('@c.us', '')
     .replace('@lid', '')
@@ -233,10 +214,25 @@ function extractNumberFromId(contactId) {
     .replace('@s.whatsapp.net', '')
     .replace('+', '');
   
-  return number || "غير معروف";
+  return number || "جهة اتصال";
 }
 
-// دالة مبسطة للحصول على معلومات جهة الاتصال
+// دالة لتنظيف الاسم
+function cleanDisplayName(name, contactId) {
+  if (!name) return extractNumberFromId(contactId);
+  
+  // إذا كان الاسم هو نفس الرقم الطويل، نعود الرقم المختصر
+  if (name.replace(/[@\.]/g, '') === contactId.replace(/[@\.]/g, '')) {
+    return extractNumberFromId(contactId);
+  }
+  
+  // إزالة البادئة إذا كانت موجودة
+  const cleanName = name.replace(/^\d+@/, '');
+  
+  return cleanName || extractNumberFromId(contactId);
+}
+
+// دالة للحصول على معلومات جهة الاتصال مع تخزين الصور
 async function getContactInfo(contactId) {
   try {
     if (!client) return null;
@@ -244,34 +240,89 @@ async function getContactInfo(contactId) {
     let name = extractNumberFromId(contactId);
     let about = "";
     let pic = null;
+    let displayName = name;
+    let isGroup = contactId.includes('@g.us');
     
-    // محاولة الحصول على معلومات جهة الاتصال باستخدام طريقة آمنة
     try {
-      // الحصول على معلومات من الرسائل الواردة
       const chat = await client.getChatById(contactId);
       if (chat) {
         name = chat.name || chat.pushname || name;
+        displayName = cleanDisplayName(name, contactId);
+        
+        if (chat.isGroup) {
+          isGroup = true;
+          displayName = name;
+        }
       }
     } catch (e) {
       console.log("⚠️ لا يمكن الحصول على معلومات المحادثة:", e.message);
     }
     
+    // محاولة الحصول على صورة الملف الشخصي
+    try {
+      const profilePicUrl = await client.getProfilePicUrl(contactId);
+      if (profilePicUrl) {
+        // حفظ الصورة مؤقتاً
+        const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.jpg`;
+        const cachePath = path.join(cacheDir, cacheFileName);
+        
+        // التحقق من وجود صورة مخبأة حديثاً
+        if (fs.existsSync(cachePath)) {
+          const stats = fs.statSync(cachePath);
+          const now = new Date();
+          const cacheAge = now - stats.mtime;
+          
+          // تحديث الصورة إذا كانت عمرها أكثر من ساعة
+          if (cacheAge > 3600000) {
+            await downloadAndCacheImage(profilePicUrl, cachePath);
+          }
+          pic = `/cache/${cacheFileName}`;
+        } else {
+          await downloadAndCacheImage(profilePicUrl, cachePath);
+          pic = `/cache/${cacheFileName}`;
+        }
+      }
+    } catch (e) {
+      // تجاهل الخطأ إذا لم توجد صورة
+    }
+    
     return {
+      id: contactId,
       name: name,
+      display_name: displayName,
+      number: extractNumberFromId(contactId),
       about: about,
       pic: pic,
-      number: extractNumberFromId(contactId),
-      id: contactId
+      is_group: isGroup,
+      pic_cached: !!pic
     };
   } catch (e) {
     console.log("⚠️ خطأ في الحصول على معلومات جهة الاتصال:", e.message);
     return {
+      id: contactId,
       name: extractNumberFromId(contactId),
+      display_name: extractNumberFromId(contactId),
+      number: extractNumberFromId(contactId),
       about: "",
       pic: null,
-      number: extractNumberFromId(contactId),
-      id: contactId
+      is_group: contactId.includes('@g.us'),
+      pic_cached: false
     };
+  }
+}
+
+// دالة لتنزيل وتخزين الصور
+async function downloadAndCacheImage(url, filePath) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('فشل تحميل الصورة');
+    
+    const buffer = await response.buffer();
+    fs.writeFileSync(filePath, buffer);
+    return true;
+  } catch (error) {
+    console.log("⚠️ خطأ في تخزين الصورة:", error.message);
+    return false;
   }
 }
 
@@ -280,43 +331,57 @@ async function getUserInfo() {
   try {
     if (!client) return null;
     
-    // طريقة بديلة للحصول على معلومات المستخدم
     const info = client.info;
     if (!info) {
-      // محاولة أخرى
-      try {
-        // الحصول على معلومات من pushname
-        const pushname = client.pupPage ? await client.pupPage.evaluate(() => {
-          return window.Store.Conn.serialize()?.pushname || "المستخدم";
-        }) : "المستخدم";
+      return {
+        id: 'unknown',
+        name: "المستخدم",
+        display_name: "المستخدم",
+        number: 'unknown',
+        about: "",
+        pic: null,
+        pic_cached: false
+      };
+    }
+    
+    // محاولة الحصول على صورة المستخدم
+    let pic = null;
+    try {
+      const profilePicUrl = await client.getProfilePicUrl(info.wid._serialized);
+      if (profilePicUrl) {
+        const cacheFileName = `user_${info.wid.user}.jpg`;
+        const cachePath = path.join(cacheDir, cacheFileName);
         
-        return {
-          id: info?.wid?._serialized || 'unknown',
-          name: pushname,
-          number: info?.wid?.user || 'unknown',
-          about: "",
-          pic: null
-        };
-      } catch (e) {
-        console.log("⚠️ خطأ في الحصول على pushname:", e.message);
+        if (fs.existsSync(cachePath)) {
+          pic = `/cache/${cacheFileName}`;
+        } else {
+          await downloadAndCacheImage(profilePicUrl, cachePath);
+          pic = `/cache/${cacheFileName}`;
+        }
       }
+    } catch (e) {
+      // تجاهل الخطأ
     }
     
     return {
-      id: info?.wid?._serialized || 'unknown',
-      name: info?.pushname || info?.me?.name || "المستخدم",
-      number: info?.wid?.user || 'unknown',
+      id: info.wid._serialized,
+      name: info.pushname || info.me?.name || "المستخدم",
+      display_name: info.pushname || info.me?.name || "المستخدم",
+      number: info.wid.user || 'unknown',
       about: "",
-      pic: null
+      pic: pic,
+      pic_cached: !!pic
     };
   } catch (e) {
     console.log("⚠️ خطأ في الحصول على معلومات المستخدم:", e.message);
     return {
       id: "unknown",
       name: "المستخدم",
+      display_name: "المستخدم",
       number: "unknown",
       about: "",
-      pic: null
+      pic: null,
+      pic_cached: false
     };
   }
 }
@@ -370,7 +435,6 @@ async function initWhatsApp(sessionId = null) {
     try {
       qrCode = await QRCode.toDataURL(qr);
       
-      // حفظ الجلسة في قاعدة البيانات
       try {
         await pool.query(
           `INSERT INTO zzapp_sessions (session_id, last_active, created_at)
@@ -393,7 +457,6 @@ async function initWhatsApp(sessionId = null) {
     console.log("✅ تم تسجيل الدخول");
     qrCode = null;
     
-    // تحديث الجلسة
     try {
       await pool.query(
         `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
@@ -409,12 +472,10 @@ async function initWhatsApp(sessionId = null) {
     isReady = true;
     qrCode = null;
     
-    // الحصول على معلومات المستخدم
     try {
       userInfo = await getUserInfo();
       console.log("👤 معلومات المستخدم:", userInfo.name);
       
-      // حفظ معلومات المستخدم في الجلسة
       try {
         await pool.query(
           `UPDATE zzapp_sessions SET user_data = $1 WHERE session_id = $2`,
@@ -430,19 +491,21 @@ async function initWhatsApp(sessionId = null) {
       userInfo = {
         id: "unknown",
         name: "المستخدم",
+        display_name: "المستخدم",
         number: "unknown",
         about: "",
-        pic: null
+        pic: null,
+        pic_cached: false
       };
       io.emit("user_info", userInfo);
     }
     
     io.emit("ready", { sessionId: currentSessionId });
     
-    // تحميل المحادثات من قاعدة البيانات
+    // تحميل المحادثات
     try {
       const chatsRes = await pool.query(
-        "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
+        "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
         [currentSessionId]
       );
       io.emit("chats", chatsRes.rows);
@@ -454,8 +517,6 @@ async function initWhatsApp(sessionId = null) {
 
   client.on("message", async (msg) => {
     try {
-      console.log("📩 رسالة جديدة من:", msg.from);
-      
       let chatId = msg.id.remote || msg.from;
       let isGroup = chatId.includes('@g.us');
       let contactInfo = await getContactInfo(chatId);
@@ -508,19 +569,19 @@ async function initWhatsApp(sessionId = null) {
         }
       }
 
-      // حفظ الرسالة في قاعدة البيانات
+      // حفظ الرسالة
       try {
         await pool.query(
           `INSERT INTO zzapp_messages 
            (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
-            content, media_url, media_type, media_size, media_name, is_from_me)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
            ON CONFLICT (message_id) DO NOTHING`,
           [chatId, 
            msg.id._serialized, 
            currentSessionId,
            msg.from,
-           contactInfo.name,
+           contactInfo.display_name,
            contactInfo.number,
            msg.body || "[وسائط]", 
            mediaUrl, 
@@ -536,24 +597,30 @@ async function initWhatsApp(sessionId = null) {
       // تحديث المحادثة
       try {
         await pool.query(
-          `INSERT INTO zzapp_chats (id, name, number, about, pic, last_message, last_time, 
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
             updated_at, is_group, session_id, message_count, unread_count)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8, 1, 1)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
+                  CASE WHEN $11 = true THEN 0 ELSE 1 END)
            ON CONFLICT (id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
-             about = COALESCE($4, zzapp_chats.about),
-             pic = COALESCE($5, zzapp_chats.pic),
-             last_message = $6,
+             display_name = COALESCE($3, zzapp_chats.display_name),
+             about = COALESCE($5, zzapp_chats.about),
+             pic = COALESCE($6, zzapp_chats.pic),
+             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+             last_message = $8,
              last_time = NOW(),
              updated_at = NOW(),
              message_count = zzapp_chats.message_count + 1,
-             unread_count = CASE WHEN $9 = true THEN zzapp_chats.unread_count ELSE zzapp_chats.unread_count + 1 END`,
+             unread_count = CASE WHEN $11 = true THEN zzapp_chats.unread_count 
+                               ELSE zzapp_chats.unread_count + 1 END`,
           [chatId, 
-           contactInfo.name, 
+           contactInfo.name,
+           contactInfo.display_name,
            contactInfo.number,
            contactInfo.about,
            contactInfo.pic,
+           contactInfo.pic_cached,
            msg.body || "[وسائط]",
            isGroup,
            currentSessionId,
@@ -566,10 +633,12 @@ async function initWhatsApp(sessionId = null) {
       // إرسال تحديث للعملاء
       const chatData = { 
         id: chatId, 
-        name: contactInfo.name, 
+        name: contactInfo.name,
+        display_name: contactInfo.display_name,
         number: contactInfo.number,
         about: contactInfo.about,
         pic: contactInfo.pic,
+        pic_cached: contactInfo.pic_cached,
         last_message: msg.body || "[وسائط]",
         last_time: new Date().toISOString(),
         is_group: isGroup,
@@ -587,7 +656,7 @@ async function initWhatsApp(sessionId = null) {
         media_name: mediaName,
         timestamp: new Date().toISOString(),
         is_from_me: msg.fromMe,
-        sender_name: contactInfo.name,
+        sender_name: contactInfo.display_name,
         sender_number: contactInfo.number,
         session_id: currentSessionId
       };
@@ -596,10 +665,6 @@ async function initWhatsApp(sessionId = null) {
 
     } catch (e) {
       console.log("❌ خطأ في معالجة الرسالة:", e.message);
-      // تجاهل خطأ ProtocolError المعروف
-      if (!e.message.includes('Protocol error')) {
-        console.error("تفاصيل الخطأ:", e);
-      }
     }
   });
 
@@ -683,7 +748,7 @@ io.on("connection", async (socket) => {
         
         try {
           const chatsRes = await pool.query(
-            "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
+            "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
             [sessionId]
           );
           socket.emit("chats", chatsRes.rows);
@@ -719,7 +784,8 @@ io.on("connection", async (socket) => {
       const messagesRes = await pool.query(
         `SELECT * FROM zzapp_messages 
          WHERE chat_id = $1 AND session_id = $2
-         ORDER BY timestamp ASC`,
+         ORDER BY timestamp ASC
+         LIMIT 100`,
         [chatId, sessionId || currentSessionId]
       );
       socket.emit("load_messages", messagesRes.rows);
@@ -746,8 +812,8 @@ io.on("connection", async (socket) => {
       try {
         await pool.query(
           `INSERT INTO zzapp_messages 
-           (chat_id, message_id, session_id, sender_id, sender_name, sender_number, content, is_from_me)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+           (chat_id, message_id, session_id, sender_id, sender_name, sender_number, content, is_from_me, timestamp)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
           [chatId, 
            message.id._serialized,
            currentSessionId,
@@ -764,22 +830,26 @@ io.on("connection", async (socket) => {
       // تحديث المحادثة
       try {
         await pool.query(
-          `INSERT INTO zzapp_chats (id, name, number, about, pic, last_message, last_time, updated_at, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7)
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
            ON CONFLICT (id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
-             about = COALESCE($4, zzapp_chats.about),
-             pic = COALESCE($5, zzapp_chats.pic),
-             last_message = $6,
+             display_name = COALESCE($3, zzapp_chats.display_name),
+             about = COALESCE($5, zzapp_chats.about),
+             pic = COALESCE($6, zzapp_chats.pic),
+             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+             last_message = $8,
              last_time = NOW(),
              updated_at = NOW(),
              message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
           [chatId, 
-           contactInfo.name, 
+           contactInfo.name,
+           contactInfo.display_name,
            contactInfo.number,
            contactInfo.about,
            contactInfo.pic,
+           contactInfo.pic_cached,
            data.text,
            currentSessionId]
         );
@@ -803,9 +873,11 @@ io.on("connection", async (socket) => {
       const chatData = {
         id: chatId,
         name: contactInfo.name,
+        display_name: contactInfo.display_name,
         number: contactInfo.number,
         about: contactInfo.about,
         pic: contactInfo.pic,
+        pic_cached: contactInfo.pic_cached,
         last_message: data.text,
         last_time: new Date().toISOString(),
         session_id: currentSessionId
@@ -853,8 +925,8 @@ io.on("connection", async (socket) => {
         await pool.query(
           `INSERT INTO zzapp_messages 
            (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
-            content, media_url, media_type, media_size, media_name, is_from_me)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
           [chatId, 
            message.id._serialized,
            currentSessionId,
@@ -874,22 +946,26 @@ io.on("connection", async (socket) => {
 
       try {
         await pool.query(
-          `INSERT INTO zzapp_chats (id, name, number, about, pic, last_message, last_time, updated_at, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7)
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
            ON CONFLICT (id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
-             about = COALESCE($4, zzapp_chats.about),
-             pic = COALESCE($5, zzapp_chats.pic),
-             last_message = $6,
+             display_name = COALESCE($3, zzapp_chats.display_name),
+             about = COALESCE($5, zzapp_chats.about),
+             pic = COALESCE($6, zzapp_chats.pic),
+             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+             last_message = $8,
              last_time = NOW(),
              updated_at = NOW(),
              message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
           [chatId, 
-           contactInfo.name, 
+           contactInfo.name,
+           contactInfo.display_name,
            contactInfo.number,
            contactInfo.about,
            contactInfo.pic,
+           contactInfo.pic_cached,
            data.caption || "[وسائط]",
            currentSessionId]
         );
@@ -916,9 +992,11 @@ io.on("connection", async (socket) => {
       const chatData = {
         id: chatId,
         name: contactInfo.name,
+        display_name: contactInfo.display_name,
         number: contactInfo.number,
         about: contactInfo.about,
         pic: contactInfo.pic,
+        pic_cached: contactInfo.pic_cached,
         last_message: data.caption || "[وسائط]",
         last_time: new Date().toISOString(),
         session_id: currentSessionId
@@ -953,7 +1031,7 @@ io.on("connection", async (socket) => {
       
       const chatId = `${cleanNumber}@c.us`;
       
-      // إرسال رسالة تجريبية للحصول على معلومات الاتصال
+      // إرسال رسالة تجريبية
       try {
         await client.sendMessage(chatId, "مرحباً 👋");
       } catch (e) {
@@ -974,9 +1052,16 @@ io.on("connection", async (socket) => {
           chatData = existing.rows[0];
         } else {
           await pool.query(
-            `INSERT INTO zzapp_chats (id, name, number, about, pic, updated_at, session_id)
-             VALUES ($1, $2, $3, $4, $5, NOW(), $6)`,
-            [chatId, contactInfo.name, cleanNumber, contactInfo.about, contactInfo.pic, currentSessionId]
+            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, updated_at, session_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)`,
+            [chatId, 
+             contactInfo.name,
+             contactInfo.display_name,
+             cleanNumber, 
+             contactInfo.about, 
+             contactInfo.pic,
+             contactInfo.pic_cached,
+             currentSessionId]
           );
           
           const result = await pool.query(
@@ -990,9 +1075,11 @@ io.on("connection", async (socket) => {
         chatData = {
           id: chatId,
           name: contactInfo.name,
+          display_name: contactInfo.display_name,
           number: cleanNumber,
           about: contactInfo.about,
           pic: contactInfo.pic,
+          pic_cached: contactInfo.pic_cached,
           last_message: "ابدأ المحادثة",
           last_time: new Date().toISOString(),
           session_id: currentSessionId
@@ -1048,7 +1135,9 @@ app.post("/upload", upload.single('file'), (req, res) => {
     
     res.json({ 
       success: true, 
-      filePath: `/uploads/${req.file.filename}`
+      filePath: `/uploads/${req.file.filename}`,
+      fileName: req.file.originalname,
+      fileSize: req.file.size
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1087,7 +1176,8 @@ app.get("/messages/:chatId/:sessionId", async (req, res) => {
     const result = await pool.query(
       `SELECT * FROM zzapp_messages 
        WHERE chat_id = $1 AND session_id = $2
-       ORDER BY timestamp ASC`,
+       ORDER BY timestamp ASC
+       LIMIT 100`,
       [req.params.chatId, req.params.sessionId]
     );
     res.json(result.rows);
@@ -1100,7 +1190,7 @@ app.get("/messages/:chatId/:sessionId", async (req, res) => {
 app.get("/chats/:sessionId", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
+      "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
       [req.params.sessionId]
     );
     res.json(result.rows);
@@ -1152,6 +1242,16 @@ app.get("/manifest.json", (req, res) => {
         "sizes": "512x512",
         "type": "image/png"
       }
+    ],
+    "categories": ["social", "communication"],
+    "shortcuts": [
+      {
+        "name": "محادثة جديدة",
+        "short_name": "جديد",
+        "description": "بدء محادثة جديدة",
+        "url": "/?newchat=true",
+        "icons": [{ "src": "/icon-96x96.png", "sizes": "96x96" }]
+      }
     ]
   });
 });
@@ -1160,14 +1260,16 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache').then(cache => {
+    caches.open('zzapp-cache-v3').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
         '/style.css',
         '/app.js',
         '/icon-192x192.png',
-        '/icon-512x512.png'
+        '/icon-512x512.png',
+        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css',
+        'https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap'
       ]);
     })
   );
@@ -1180,10 +1282,37 @@ self.addEventListener('fetch', event => {
     })
   );
 });
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
+      return Promise.all(
+        cacheNames.filter(cacheName => {
+          return cacheName.startsWith('zzapp-cache-') && cacheName !== 'zzapp-cache-v3';
+        }).map(cacheName => {
+          return caches.delete(cacheName);
+        })
+      );
+    })
+  );
+});
   `;
   
   res.set('Content-Type', 'application/javascript');
   res.send(sw);
+});
+
+// روت لمسح الصور المخبأة
+app.post("/clear-cache", (req, res) => {
+  try {
+    const files = fs.readdirSync(cacheDir);
+    files.forEach(file => {
+      fs.unlinkSync(path.join(cacheDir, file));
+    });
+    res.json({ success: true, message: "تم مسح الكاش" });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // الصفحة الرئيسية
