@@ -19,7 +19,10 @@ socket.on("connect", function() {
   
   const savedSession = localStorage.getItem('whatsapp_session');
   if (savedSession) {
+    console.log("🔍 محاولة استعادة الجلسة:", savedSession);
     socket.emit("restore_session", savedSession);
+  } else {
+    console.log("❌ لا توجد جلسة محفوظة");
   }
   
   showNotification("متصل بالسيرفر", "success");
@@ -40,6 +43,7 @@ socket.on("qr", function(data) {
   if (data.sessionId) {
     currentSessionId = data.sessionId;
     localStorage.setItem('whatsapp_session', data.sessionId);
+    console.log("💾 تم حفظ الجلسة:", data.sessionId);
   }
 });
 
@@ -57,7 +61,7 @@ socket.on("ready", function(data) {
 });
 
 socket.on("session_restored", function(data) {
-  console.log("🔓 تم استعادة الجلسة");
+  console.log("🔓 تم استعادة الجلسة:", data.sessionId);
   currentSessionId = data.sessionId;
   showScreen("chats");
   loadChats();
@@ -176,7 +180,12 @@ function updateAvatar(element, picUrl, name) {
   if (!element) return;
   
   if (picUrl) {
-    element.style.backgroundImage = `url('${picUrl}?t=${Date.now()}')`;
+    // إضافة طابع زمني لمنع التخزين المؤقت
+    const timestamp = Date.now();
+    const urlWithTimestamp = picUrl.includes('?') ? 
+      `${picUrl}&t=${timestamp}` : `${picUrl}?t=${timestamp}`;
+    
+    element.style.backgroundImage = `url('${urlWithTimestamp}')`;
     element.style.backgroundSize = 'cover';
     element.style.backgroundPosition = 'center';
     element.innerHTML = '';
@@ -206,6 +215,7 @@ function showScreen(screenName) {
 function loadChats() {
   if (!currentSessionId) {
     console.log("❌ لا يوجد جلسة نشطة");
+    showNotification("يرجى تسجيل الدخول أولاً", "warning");
     return;
   }
   
@@ -225,6 +235,7 @@ function loadChats() {
         <div class="error-message">
           <i class="fas fa-exclamation-triangle"></i>
           <p>فشل تحميل المحادثات</p>
+          <p>${error.message}</p>
           <button onclick="loadChats()" class="retry-btn">إعادة المحاولة</button>
         </div>
       `;
@@ -642,12 +653,14 @@ function sendVoiceMessage(filePath) {
     return;
   }
   
+  console.log("🎤 إرسال رسالة صوتية:", filePath);
+  
   socket.emit("send_media", {
     to: currentChat,
     filePath: filePath,
     mediaType: 'audio',
     isVoiceMessage: true,
-    caption: ''
+    caption: 'رسالة صوتية'
   });
   
   showNotification("تم إرسال الرسالة الصوتية", "success");
@@ -1065,12 +1078,22 @@ function attachImage() {
     }
     
     var mediaType = 'document';
+    var isVoiceMessage = false;
+    
     if (file.type.startsWith('image/')) {
       mediaType = 'image';
     } else if (file.type.startsWith('video/')) {
       mediaType = 'video';
     } else if (file.type.startsWith('audio/')) {
       mediaType = 'audio';
+      // إذا كان اسم الملف يحتوي على "voice" فهو رسالة صوتية
+      isVoiceMessage = file.name.toLowerCase().includes('voice');
+    }
+    
+    // إذا كان امتداد الملف .3gp وكان صورة، سيتم تحويله تلقائياً في السيرفر
+    var fileExt = file.name.toLowerCase().split('.').pop();
+    if (fileExt === '3gp' && mediaType === 'image') {
+      showNotification("جارٍ تحويل صورة 3gp إلى JPG...", "info");
     }
     
     var formData = new FormData();
@@ -1093,6 +1116,7 @@ function attachImage() {
           to: currentChat,
           filePath: result.filePath,
           mediaType: mediaType,
+          isVoiceMessage: isVoiceMessage,
           caption: file.name
         });
         showNotification("تم إرسال الملف", "success");
@@ -1233,6 +1257,37 @@ function clearCache() {
     });
 }
 
+// إعادة تشغيل واتساب
+function restartWhatsApp() {
+  if (confirm("هل تريد إعادة تشغيل واتساب؟ هذا قد يحل مشاكل الاتصال.")) {
+    fetch('/restart-whatsapp', { method: 'POST' })
+      .then(response => response.json())
+      .then(result => {
+        if (result.success) {
+          showNotification(result.message, "info");
+        }
+      })
+      .catch(error => {
+        showNotification("فشل إعادة التشغيل", "error");
+      });
+  }
+}
+
+// التحقق من حالة التطبيق
+function checkAppStatus() {
+  fetch('/status')
+    .then(response => response.json())
+    .then(status => {
+      console.log("📊 حالة التطبيق:", status);
+      if (!status.isReady && !status.hasQr) {
+        showNotification("واتساب غير متصل، جاري إعادة الاتصال...", "warning");
+      }
+    })
+    .catch(error => {
+      console.error('❌ خطأ في التحقق من الحالة:', error);
+    });
+}
+
 // عند تحميل الصفحة
 window.onload = function() {
   console.log("📱 التطبيق جاهز للهواتف القديمة والزرارية");
@@ -1325,6 +1380,14 @@ window.onload = function() {
     cacheBtn.innerHTML = '<i class="fas fa-broom"></i>';
     cacheBtn.onclick = clearCache;
     chatsActions.appendChild(cacheBtn);
+    
+    // زر إعادة تشغيل واتساب
+    var restartBtn = document.createElement('button');
+    restartBtn.className = 'chats-icon-btn restart-btn';
+    restartBtn.title = 'إعادة تشغيل واتساب';
+    restartBtn.innerHTML = '<i class="fas fa-redo"></i>';
+    restartBtn.onclick = restartWhatsApp;
+    chatsActions.appendChild(restartBtn);
   }
   
   // إضافة زر الإيموجي
@@ -1373,14 +1436,20 @@ window.onload = function() {
             .then(result => {
               if (result.success) {
                 var mediaType = 'document';
+                var isVoiceMessage = false;
+                
                 if (file.type.startsWith('image/')) mediaType = 'image';
                 else if (file.type.startsWith('video/')) mediaType = 'video';
-                else if (file.type.startsWith('audio/')) mediaType = 'audio';
+                else if (file.type.startsWith('audio/')) {
+                  mediaType = 'audio';
+                  isVoiceMessage = file.name.toLowerCase().includes('voice');
+                }
                 
                 socket.emit("send_media", {
                   to: currentChat,
                   filePath: result.filePath,
                   mediaType: mediaType,
+                  isVoiceMessage: isVoiceMessage,
                   caption: file.name
                 });
                 
@@ -1410,6 +1479,9 @@ window.onload = function() {
     }
   });
   
+  // التحقق من حالة التطبيق كل 30 ثانية
+  setInterval(checkAppStatus, 30000);
+  
   // إظهار شاشة الانتظار
   showScreen("login");
   
@@ -1422,9 +1494,20 @@ window.onload = function() {
   // التحقق من وضع عدم الاتصال
   window.addEventListener('online', () => {
     showNotification("تم استعادة الاتصال بالإنترنت", "success");
+    // محاولة إعادة الاتصال بالسيرفر
+    setTimeout(() => {
+      if (!socket.connected) {
+        socket.connect();
+      }
+    }, 1000);
   });
   
   window.addEventListener('offline', () => {
     showNotification("تم فقدان الاتصال بالإنترنت", "error");
+  });
+  
+  // إضافة معالج للأخطاء غير المتوقعة
+  window.addEventListener('error', function(e) {
+    console.error('⚠️ خطأ غير متوقع:', e.message, e.filename, e.lineno);
   });
 };
