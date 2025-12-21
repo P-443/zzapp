@@ -648,7 +648,6 @@ function sendMessage() {
 }
 
 // إرسال رسالة صوتية
-// إرسال رسالة صوتية - محسّن
 function sendVoiceMessage(filePath) {
   if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
@@ -668,8 +667,8 @@ function sendVoiceMessage(filePath) {
   
   showNotification("جارٍ إرسال الرسالة الصوتية...", "info");
 }
-// بدء تسجيل صوتي
-// بدء تسجيل صوتي - مبسط
+
+// بدء تسجيل صوتي - محسّن
 function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showNotification("المتصفح لا يدعم التسجيل الصوتي", "error");
@@ -791,31 +790,6 @@ function startRecording() {
     console.error("❌ خطأ في التسجيل:", error);
     showNotification("فشل الوصول للميكروفون: " + error.message, "error");
   });
-}
-        
-        reader.readAsDataURL(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-      
-      mediaRecorder.start(100);
-      recordingStartTime = Date.now();
-      
-      document.getElementById("recording-area").style.display = "block";
-      document.getElementById("message-input-area").style.display = "none";
-      
-      document.getElementById("record-btn").innerHTML = '<i class="fas fa-stop"></i>';
-      document.getElementById("record-btn").onclick = stopRecording;
-      
-      updateRecordingTimer();
-      recordingTimer = setInterval(updateRecordingTimer, 1000);
-      
-      startVisualizer();
-      
-    })
-    .catch(function(error) {
-      console.error("❌ خطأ في التسجيل:", error);
-      showNotification("فشل الوصول للميكروفون: " + error.message, "error");
-    });
 }
 
 // إيقاف التسجيل
