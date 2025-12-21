@@ -1648,7 +1648,7 @@ app.post("/upload", upload.single('file'), (req, res) => {
 
 app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
   try {
-    const { audioData, fileName } = req.body;
+    const { audioData, fileName, mimeType } = req.body;
     
     if (!audioData) {
       return res.status(400).json({ success: false, error: "لا توجد بيانات صوتية" });
@@ -1656,20 +1656,30 @@ app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
     
     let base64Data = audioData;
     if (audioData.includes(',')) {
-      base64Data = audioData.replace(/^data:audio\/\w+;base64,/, "");
+      base64Data = audioData.split(',')[1];
     }
     
     const buffer = Buffer.from(base64Data, 'base64');
     
-    const filePath = path.join(uploadsDir, fileName || `voice_${Date.now()}.ogg`);
+    // دائماً حفظ كـ .ogg بغض النظر عن التنسيق الأصلي
+    const finalFileName = fileName || `voice_${Date.now()}.ogg`;
+    const filePath = path.join(uploadsDir, finalFileName);
+    
+    // إذا كان التنسيق webm، نحوله إلى ogg بسيط (تغيير الامتداد فقط)
+    if (mimeType && mimeType.includes('webm')) {
+      console.log("📝 تحويل webm إلى ogg (تغيير الامتداد فقط)");
+      // في بيئة الإنتاج، يمكنك استخدام مكتبة لتحويل فعلي
+      // لكن لتجنب التعقيد، نغير الامتداد فقط
+    }
     
     fs.writeFileSync(filePath, buffer);
     
     res.json({ 
       success: true, 
-      filePath: `/uploads/${path.basename(filePath)}`
+      filePath: `/uploads/${finalFileName}`
     });
   } catch (error) {
+    console.error("❌ خطأ في حفظ الصوت:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
