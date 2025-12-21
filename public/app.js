@@ -291,7 +291,6 @@ function addChatItem(chat) {
   var unreadCount = chat.unread_count || 0;
   var initials = getInitials(chat.display_name || chat.name || chat.number || "?");
   
-  // عرض الاسم المعروض بدلاً من الاسم الطويل
   var displayName = chat.display_name || chat.name || chat.number || "مستخدم";
   var displayInfo = displayName;
   
@@ -375,11 +374,9 @@ function updateChatPreview(chatId, lastMessage, timestamp) {
 function getInitials(name) {
   if (!name || name.trim() === "") return "?";
   
-  // إزالة الأرقام والرموز الخاصة
   var cleanName = name.replace(/[0-9@\.\+]/g, '').trim();
   if (cleanName === "") return name.substring(0, 2);
   
-  // تقسيم الاسم وأخذ أول حرفين
   var parts = cleanName.split(/\s+/);
   if (parts.length >= 2) {
     return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
@@ -572,7 +569,6 @@ function showMessage(data, isSelf) {
     if (data.media_type === 'image') {
       content += '<div class="message-media"><img src="' + data.media + '" onclick="viewImage(\'' + data.media + '\')" loading="lazy" alt="صورة" class="media-preview"></div>';
     } else if (data.media_type === 'audio') {
-      // عرض ريكورد صوتي
       content += '<div class="message-audio"><audio controls preload="none"><source src="' + data.media + '" type="audio/ogg"></audio></div>';
     } else if (data.media_type === 'video') {
       content += '<div class="message-video"><video controls preload="metadata"><source src="' + data.media + '"></video></div>';
@@ -585,7 +581,6 @@ function showMessage(data, isSelf) {
   }
   
   if (data.text && data.text !== '[وسائط]') {
-    // تحويل الروابط إلى روابط قابلة للنقر
     var textWithLinks = data.text.replace(
       /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig,
       '<a href="$1" target="_blank" rel="noopener">$1</a>'
@@ -1098,7 +1093,7 @@ function attachImage() {
           to: currentChat,
           filePath: result.filePath,
           mediaType: mediaType,
-          caption: ''
+          caption: file.name
         });
         showNotification("تم إرسال الملف", "success");
       } else {
