@@ -669,6 +669,7 @@ function sendVoiceMessage(filePath) {
   showNotification("جارٍ إرسال الرسالة الصوتية...", "info");
 }
 // بدء تسجيل صوتي
+// بدء تسجيل صوتي - مبسط
 function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showNotification("المتصفح لا يدعم التسجيل الصوتي", "error");
@@ -683,65 +684,114 @@ function startRecording() {
   navigator.mediaDevices.getUserMedia({ 
     audio: {
       channelCount: 1,
-      sampleRate: 44100,
+      sampleRate: 48000, // 48kHz لتحسين الجودة
       echoCancellation: true,
-      noiseSuppression: true
+      noiseSuppression: true,
+      autoGainControl: true
     }
   })
-    .then(function(stream) {
-      isRecording = true;
-      audioChunks = [];
-      
-      const options = { 
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 128000
-      };
-      
-      try {
-        mediaRecorder = new MediaRecorder(stream, options);
-      } catch (e) {
-        mediaRecorder = new MediaRecorder(stream);
+  .then(function(stream) {
+    isRecording = true;
+    audioChunks = [];
+    
+    // استخدم webm لأنه مدعوم من معظم المتصفحات
+    const mimeTypes = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/ogg'
+    ];
+    
+    let mediaRecorderOptions = {};
+    
+    for (let mimeType of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        mediaRecorderOptions = { mimeType: mimeType };
+        console.log("✅ تنسيق صوتي مدعوم:", mimeType);
+        break;
       }
+    }
+    
+    try {
+      mediaRecorder = new MediaRecorder(stream, mediaRecorderOptions);
+    } catch (e) {
+      mediaRecorder = new MediaRecorder(stream);
+    }
+    
+    mediaRecorder.ondataavailable = function(event) {
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+    };
+    
+    mediaRecorder.onstop = function() {
+      var audioBlob = new Blob(audioChunks, { 
+        type: mediaRecorder.mimeType || 'audio/webm' 
+      });
       
-      mediaRecorder.ondataavailable = function(event) {
-        if (event.data.size > 0) {
-          audioChunks.push(event.data);
-        }
+      var reader = new FileReader();
+      reader.onloadend = function() {
+        var base64data = reader.result;
+        var fileName = 'voice_' + Date.now() + '.webm';
+        
+        fetch('/save_voice', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            audioData: base64data,
+            fileName: fileName,
+            mimeType: mediaRecorder.mimeType || 'audio/webm'
+          })
+        })
+        .then(response => response.json())
+        .then(result => {
+          if (result.success) {
+            // إرسال كرسالة صوتية (التحويل سيتم في السيرفر)
+            socket.emit("send_media", {
+              to: currentChat,
+              filePath: result.filePath,
+              mediaType: 'audio',
+              isVoiceMessage: true,
+              caption: 'رسالة صوتية 🎤'
+            });
+            showNotification("جارٍ إرسال الرسالة الصوتية...", "info");
+          } else {
+            showNotification("فشل حفظ الرسالة الصوتية", "error");
+          }
+        })
+        .catch(error => {
+          console.error('❌ خطأ في حفظ الرسالة الصوتية:', error);
+          showNotification("فشل إرسال الرسالة الصوتية", "error");
+        });
       };
       
-      mediaRecorder.onstop = function() {
-        var audioBlob = new Blob(audioChunks, { 
-          type: mediaRecorder.mimeType || 'audio/webm' 
-        });
-        
-        var reader = new FileReader();
-        reader.onloadend = function() {
-          var base64data = reader.result;
-          var fileName = 'voice_' + Date.now() + '.ogg';
-          
-          fetch('/save_voice', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              audioData: base64data,
-              fileName: fileName
-            })
-          })
-          .then(response => response.json())
-          .then(result => {
-            if (result.success) {
-              sendVoiceMessage(result.filePath);
-            } else {
-              showNotification("فشل حفظ الرسالة الصوتية", "error");
-            }
-          })
-          .catch(error => {
-            console.error('❌ خطأ في حفظ الرسالة الصوتية:', error);
-            showNotification("فشل حفظ الرسالة الصوتية", "error");
-          });
-        };
+      reader.readAsDataURL(audioBlob);
+      
+      stream.getTracks().forEach(track => track.stop());
+    };
+    
+    mediaRecorder.start(100);
+    recordingStartTime = Date.now();
+    
+    document.getElementById("recording-area").style.display = "block";
+    document.getElementById("message-input-area").style.display = "none";
+    
+    document.getElementById("record-btn").innerHTML = '<i class="fas fa-stop"></i>';
+    document.getElementById("record-btn").onclick = stopRecording;
+    
+    updateRecordingTimer();
+    recordingTimer = setInterval(updateRecordingTimer, 1000);
+    
+    startVisualizer();
+    
+  })
+  .catch(function(error) {
+    console.error("❌ خطأ في التسجيل:", error);
+    showNotification("فشل الوصول للميكروفون: " + error.message, "error");
+  });
+}
         
         reader.readAsDataURL(audioBlob);
         stream.getTracks().forEach(track => track.stop());
