@@ -41,7 +41,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
       'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
@@ -60,32 +60,61 @@ const upload = multer({
 });
 
 /* ================= DATABASE ================= */
-// استخدام قاعدة البيانات البعيدة
-const connectionString = "postgres://postgres:6DQNh71sjOwHWwi5VYvGGZDtx5GpsdXRz6DWQKb7mBy9fwHNTn9X21yAJy05A14v@31.97.47.20:5433/postgres?sslmode=allow";
+// استخدام قاعدة البيانات البعيدة مع إصلاح SSL
+const getDatabaseConfig = () => {
+  const connectionString = process.env.DATABASE_URL || "postgres://postgres:6DQNh71sjOwHWwi5VYvGGZDtx5GpsdXRz6DWQKb7mBy9fwHNTn9X21yAJy05A14v@31.97.47.20:5433/postgres";
+  
+  // تحليل connection string
+  const url = new URL(connectionString);
+  const config = {
+    host: url.hostname,
+    port: parseInt(url.port) || 5432,
+    database: url.pathname.replace('/', ''),
+    user: url.username,
+    password: url.password,
+    ssl: {
+      rejectUnauthorized: false, // إصلاح مشكلة SSL
+      require: true
+    }
+  };
+  
+  console.log(`📊 الاتصال بقاعدة البيانات: ${config.host}:${config.port}`);
+  return config;
+};
 
-const pool = new Pool({
-  connectionString: connectionString,
-  ssl: {
-    rejectUnauthorized: false // مطلوب للاتصال الآمن
-  }
-});
+const pool = new Pool(getDatabaseConfig());
 
 // اختبار الاتصال بقاعدة البيانات
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('❌ فشل الاتصال بقاعدة البيانات:', err.message);
-  } else {
+async function testDatabaseConnection() {
+  try {
+    const client = await pool.connect();
     console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
-    release();
+    
+    // اختبار بسيط
+    const result = await client.query('SELECT NOW() as current_time');
+    console.log(`🕐 وقت قاعدة البيانات: ${result.rows[0].current_time}`);
+    
+    client.release();
+    return true;
+  } catch (error) {
+    console.error('❌ فشل الاتصال بقاعدة البيانات:', error.message);
+    return false;
   }
-});
+}
 
 // إعداد قاعدة البيانات
 async function setupDatabase() {
   try {
     console.log("🔧 جاري إعداد قاعدة البيانات...");
     
-    // عدم حذف الجداول إذا كانت موجودة، فقط إنشاؤها إذا لم تكن موجودة
+    // اختبار الاتصال أولاً
+    const connected = await testDatabaseConnection();
+    if (!connected) {
+      console.log("⚠️ تأجيل إعداد قاعدة البيانات حتى يصبح الاتصال متاحاً");
+      return;
+    }
+    
+    // إنشاء الجداول إذا لم تكن موجودة
     await pool.query(`
       CREATE TABLE IF NOT EXISTS zzapp_sessions (
         id SERIAL PRIMARY KEY,
@@ -135,12 +164,29 @@ async function setupDatabase() {
       )
     `);
 
-    // إنشاء فهارس إذا لم تكن موجودة
+    // محاولة إنشاء الفهارس
     try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_session ON zzapp_chats(session_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat ON zzapp_messages(chat_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON zzapp_messages(session_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON zzapp_messages(timestamp)');
+      await pool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_chats_session') THEN
+            CREATE INDEX idx_chats_session ON zzapp_chats(session_id);
+          END IF;
+          
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_chat') THEN
+            CREATE INDEX idx_messages_chat ON zzapp_messages(chat_id);
+          END IF;
+          
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_session') THEN
+            CREATE INDEX idx_messages_session ON zzapp_messages(session_id);
+          END IF;
+          
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_timestamp') THEN
+            CREATE INDEX idx_messages_timestamp ON zzapp_messages(timestamp);
+          END IF;
+        END
+        $$;
+      `);
     } catch (indexError) {
       console.log("⚠️ خطأ في إنشاء الفهارس:", indexError.message);
     }
@@ -152,7 +198,23 @@ async function setupDatabase() {
   }
 }
 
-setupDatabase();
+// إعداد قاعدة البيانات مع إعادة المحاولة
+async function setupDatabaseWithRetry(retries = 3, delay = 5000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await setupDatabase();
+      return;
+    } catch (error) {
+      console.log(`⚠️ محاولة ${i + 1}/${retries} فشلت، إعادة المحاولة بعد ${delay/1000} ثواني...`);
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  console.log("⚠️ استمرار التطبيق بدون اتصال بقاعدة البيانات");
+}
+
+setupDatabaseWithRetry();
 
 /* ================= WHATSAPP ================= */
 let qrCode = null;
@@ -218,7 +280,7 @@ async function getContactInfo(contactId) {
   }
 }
 
-// دالة لتهيئة واتساب مع إصلاح خطأ Puppeteer
+// دالة لتهيئة واتساب
 async function initWhatsApp(sessionId = null) {
   console.log("🔧 جاري تشغيل واتساب...");
 
@@ -238,7 +300,7 @@ async function initWhatsApp(sessionId = null) {
       dataPath: sessionsDir
     }),
     puppeteer: {
-      headless: "new", // استخدام الوضع الجديد لـ headless
+      headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
       args: [
         '--no-sandbox',
@@ -309,8 +371,6 @@ async function initWhatsApp(sessionId = null) {
     // الحصول على معلومات المستخدم
     try {
       const me = await client.getMe();
-      const myContact = await client.getContactById(me._serialized);
-      
       userInfo = {
         id: me._serialized,
         name: me.pushname || me.name || "المستخدم",
@@ -319,21 +379,21 @@ async function initWhatsApp(sessionId = null) {
         pic: null
       };
       
-      // الحصول على البايو
       try {
-        userInfo.about = myContact.about || "";
+        const myContact = await client.getContactById(me._serialized);
+        if (myContact) {
+          userInfo.about = myContact.about || "";
+          try {
+            userInfo.pic = await myContact.getProfilePicUrl();
+          } catch (e) {
+            console.log("⚠️ لا توجد صورة للمستخدم");
+          }
+        }
       } catch (e) {
-        console.log("⚠️ لا يمكن الحصول على البايو");
+        console.log("⚠️ لا يمكن الحصول على معلومات الاتصال:", e.message);
       }
       
-      // الحصول على صورة الملف الشخصي
-      try {
-        userInfo.pic = await myContact.getProfilePicUrl();
-      } catch (e) {
-        console.log("⚠️ لا توجد صورة للمستخدم");
-      }
-      
-      console.log("👤 معلومات المستخدم:", userInfo.name, "- البايو:", userInfo.about);
+      console.log("👤 معلومات المستخدم:", userInfo.name);
       
       // حفظ معلومات المستخدم في الجلسة
       try {
@@ -360,7 +420,7 @@ async function initWhatsApp(sessionId = null) {
     
     io.emit("ready", { sessionId: currentSessionId });
     
-    // تحميل المحادثات من قاعدة البيانات لهذه الجلسة
+    // تحميل المحادثات من قاعدة البيانات
     try {
       const chatsRes = await pool.query(
         "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
@@ -369,7 +429,6 @@ async function initWhatsApp(sessionId = null) {
       io.emit("chats", chatsRes.rows);
     } catch (e) {
       console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
-      // إذا فشل، أرسل قائمة فارغة
       io.emit("chats", []);
     }
   });
@@ -421,9 +480,7 @@ async function initWhatsApp(sessionId = null) {
             const buffer = Buffer.from(media.data, 'base64');
             mediaSize = buffer.length;
             
-            // حفظ الملف
             fs.writeFileSync(filePath, buffer);
-            
             mediaUrl = `/downloads/${fileName}`;
             mediaName = msg.mediaFilename || fileName;
           }
@@ -454,10 +511,10 @@ async function initWhatsApp(sessionId = null) {
            msg.fromMe]
         );
       } catch (dbError) {
-        console.log("⚠️ خطأ في حفظ الرسالة في قاعدة البيانات:", dbError.message);
+        console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
       }
 
-      // حفظ أو تحديث المحادثة
+      // تحديث المحادثة
       try {
         await pool.query(
           `INSERT INTO zzapp_chats (id, name, number, about, pic, last_message, last_time, 
@@ -484,7 +541,7 @@ async function initWhatsApp(sessionId = null) {
            msg.fromMe]
         );
       } catch (dbError) {
-        console.log("⚠️ خطأ في تحديث المحادثة في قاعدة البيانات:", dbError.message);
+        console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
       }
 
       // إرسال تحديث للعملاء
@@ -520,7 +577,6 @@ async function initWhatsApp(sessionId = null) {
 
     } catch (e) {
       console.log("❌ خطأ في معالجة الرسالة:", e.message);
-      // تجاهل خطأ ProtocolError المعروف
       if (!e.message.includes('Protocol error')) {
         console.error("تفاصيل الخطأ:", e);
       }
@@ -569,17 +625,12 @@ async function initWhatsApp(sessionId = null) {
     isReady = false;
   });
 
-  client.on("change_state", (state) => {
-    console.log("🔄 تغيير حالة:", state);
-  });
-
   try {
     await client.initialize();
     console.log("✅ تم تشغيل واتساب بنجاح");
   } catch (error) {
     console.error("❌ فشل تشغيل واتساب:", error);
     
-    // إعادة المحاولة بعد 10 ثواني
     setTimeout(() => {
       console.log("🔄 إعادة المحاولة...");
       initWhatsApp(currentSessionId);
@@ -606,31 +657,33 @@ io.on("connection", async (socket) => {
       if (sessionRes.rows.length > 0) {
         const session = sessionRes.rows[0];
         
-        // إرسال معلومات المستخدم إذا كانت محفوظة
         if (session.user_data) {
           socket.emit("user_info", session.user_data);
         }
         
-        // إرسال المحادثات لهذه الجلسة
-        const chatsRes = await pool.query(
-          "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
-          [sessionId]
-        );
-        socket.emit("chats", chatsRes.rows);
+        try {
+          const chatsRes = await pool.query(
+            "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 100",
+            [sessionId]
+          );
+          socket.emit("chats", chatsRes.rows);
+        } catch (e) {
+          console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
+          socket.emit("chats", []);
+        }
         
         socket.emit("session_restored", { sessionId: sessionId });
       }
     } catch (e) {
       console.log("❌ خطأ في استعادة الجلسة:", e.message);
+      socket.emit("chats", []);
     }
   });
 
-  // إرسال معلومات المستخدم إذا كانت متوفرة
   if (userInfo) {
     socket.emit("user_info", userInfo);
   }
 
-  // التحقق من حالة الاتصال
   if (isReady) {
     socket.emit("ready", { sessionId: currentSessionId });
   } else if (qrCode) {
@@ -667,7 +720,6 @@ io.on("connection", async (socket) => {
       const chatId = data.to.includes('@') ? data.to : `${data.to}@c.us`;
       const message = await client.sendMessage(chatId, data.text);
       
-      // الحصول على معلومات جهة الاتصال
       const contactInfo = await getContactInfo(chatId);
       
       // حفظ الرسالة
@@ -728,7 +780,6 @@ io.on("connection", async (socket) => {
       
       socket.emit("message", messageData);
       
-      // إرسال تحديث للمحادثة
       const chatData = {
         id: chatId,
         name: contactInfo.name,
@@ -764,7 +815,6 @@ io.on("connection", async (socket) => {
         return;
       }
 
-      // التحقق من حجم الملف
       const stats = fs.statSync(mediaPath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       
@@ -773,11 +823,9 @@ io.on("connection", async (socket) => {
         return;
       }
 
-      // إرسال الوسائط
       const media = MessageMedia.fromFilePath(mediaPath);
       const message = await client.sendMessage(chatId, media, { caption: data.caption || '' });
 
-      // الحصول على معلومات جهة الاتصال
       const contactInfo = await getContactInfo(chatId);
 
       // حفظ في قاعدة البيانات
@@ -886,7 +934,6 @@ io.on("connection", async (socket) => {
       const chatId = `${cleanNumber}@c.us`;
       const contactInfo = await getContactInfo(chatId);
       
-      // التحقق من وجود المحادثة
       let chatData;
       
       try {
@@ -912,7 +959,6 @@ io.on("connection", async (socket) => {
         }
       } catch (dbError) {
         console.log("⚠️ خطأ في قاعدة البيانات:", dbError.message);
-        // إنشاء بيانات افتراضية
         chatData = {
           id: chatId,
           name: contactInfo.name,
@@ -934,37 +980,6 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // حفظ رسالة صوتية
-  socket.on("save_voice_message", async (data) => {
-    try {
-      const { chatId, audioData, fileName } = data;
-      
-      if (!audioData || !chatId) {
-        socket.emit("error", "بيانات غير كافية");
-        return;
-      }
-      
-      let base64Data = audioData;
-      if (audioData.includes(',')) {
-        base64Data = audioData.split(',')[1];
-      }
-      
-      const buffer = Buffer.from(base64Data, 'base64');
-      const filePath = path.join(uploadsDir, fileName);
-      
-      fs.writeFileSync(filePath, buffer);
-      
-      socket.emit("voice_saved", {
-        filePath: `/uploads/${fileName}`,
-        fileName: fileName
-      });
-      
-    } catch (error) {
-      console.log("❌ خطأ في حفظ الرسالة الصوتية:", error.message);
-      socket.emit("error", "فشل حفظ الرسالة الصوتية");
-    }
-  });
-  
   // تسجيل الخروج
   socket.on("logout", async () => {
     try {
@@ -974,7 +989,6 @@ io.on("connection", async (socket) => {
         isReady = false;
         userInfo = null;
         
-        // حذف الجلسة من قاعدة البيانات
         try {
           await pool.query("DELETE FROM zzapp_sessions WHERE session_id = $1", [currentSessionId]);
           await pool.query("DELETE FROM zzapp_chats WHERE session_id = $1", [currentSessionId]);
@@ -998,7 +1012,6 @@ io.on("connection", async (socket) => {
 });
 
 /* ================= ROUTES ================= */
-// رفع ملف
 app.post("/upload", upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
@@ -1007,17 +1020,13 @@ app.post("/upload", upload.single('file'), (req, res) => {
     
     res.json({ 
       success: true, 
-      filePath: `/uploads/${req.file.filename}`,
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-      mimeType: req.file.mimetype
+      filePath: `/uploads/${req.file.filename}`
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// حفظ صوت من base64
 app.post("/save_voice", express.json({ limit: '50mb' }), (req, res) => {
   try {
     const { audioData, fileName } = req.body;
@@ -1119,7 +1128,6 @@ app.get("/manifest.json", (req, res) => {
   });
 });
 
-// خدمة Worker للتطبيق
 app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
@@ -1166,22 +1174,17 @@ server.listen(PORT, () => {
   console.log("📱 واجهة متوافقة مع الهواتف القديمة والزرارية");
   console.log("🌐 افتح المتصفح على: http://localhost:" + PORT);
   console.log("📱 التطبيق متاح للتثبيت كمتصفح PWA");
-  console.log("🗄️ قاعدة البيانات: متصلة بنجاح");
 });
 
-// معالجة الأخطاء غير المتوقعة
+// معالجة الأخطاء
 process.on('uncaughtException', (err) => {
   console.error('❌ خطأ غير متوقع:', err.message);
-  if (err.message.includes('Protocol error')) {
-    console.log('⚠️ تم تجاهل خطأ ProtocolError');
-  }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ وعد مرفوض:', reason);
 });
 
-// إغلاق الاتصال بقاعدة البيانات عند إنهاء التطبيق
 process.on('SIGINT', async () => {
   console.log('🛑 إغلاق التطبيق...');
   if (client) {
