@@ -21,8 +21,10 @@ socket.on("connect", function() {
   if (savedSession) {
     console.log("🔍 محاولة استعادة الجلسة:", savedSession);
     socket.emit("restore_session", savedSession);
+    document.getElementById("status").innerHTML = "جارٍ استعادة الجلسة...";
   } else {
     console.log("❌ لا توجد جلسة محفوظة");
+    document.getElementById("status").innerHTML = "جارٍ الاتصال...";
   }
   
   showNotification("متصل بالسيرفر", "success");
@@ -30,7 +32,6 @@ socket.on("connect", function() {
 
 socket.on("waiting", function() {
   console.log("⏳ في انتظار الاتصال");
-  showScreen("login");
   document.getElementById("status").innerHTML = "جارٍ الاتصال...";
 });
 
@@ -1233,46 +1234,6 @@ function logout() {
   }
 }
 
-// مسح الكاش
-function clearCache() {
-  fetch('/clear-cache', { method: 'POST' })
-    .then(response => response.json())
-    .then(result => {
-      if (result.success) {
-        showNotification("تم مسح الكاش بنجاح", "success");
-        // تحديث الصور
-        document.querySelectorAll('.avatar-img').forEach(img => {
-          if (img.style.backgroundImage) {
-            const currentSrc = img.style.backgroundImage;
-            img.style.backgroundImage = currentSrc.replace(/\?t=\d+/, '') + '?t=' + Date.now();
-          }
-        });
-      } else {
-        showNotification("فشل مسح الكاش", "error");
-      }
-    })
-    .catch(error => {
-      console.error('❌ خطأ في مسح الكاش:', error);
-      showNotification("فشل مسح الكاش", "error");
-    });
-}
-
-// إعادة تشغيل واتساب
-function restartWhatsApp() {
-  if (confirm("هل تريد إعادة تشغيل واتساب؟ هذا قد يحل مشاكل الاتصال.")) {
-    fetch('/restart-whatsapp', { method: 'POST' })
-      .then(response => response.json())
-      .then(result => {
-        if (result.success) {
-          showNotification(result.message, "info");
-        }
-      })
-      .catch(error => {
-        showNotification("فشل إعادة التشغيل", "error");
-      });
-  }
-}
-
 // التحقق من حالة التطبيق
 function checkAppStatus() {
   fetch('/status')
@@ -1362,7 +1323,7 @@ window.onload = function() {
     }
   });
   
-  // إضافة أزرار الإجراءات
+  // إضافة أزرار الإجراءات (فقط تسجيل الخروج)
   var chatsActions = document.querySelector('.chats-actions');
   if (chatsActions) {
     // زر تسجيل الخروج
@@ -1372,22 +1333,6 @@ window.onload = function() {
     logoutBtn.innerHTML = '<i class="fas fa-sign-out-alt"></i>';
     logoutBtn.onclick = logout;
     chatsActions.appendChild(logoutBtn);
-    
-    // زر مسح الكاش
-    var cacheBtn = document.createElement('button');
-    cacheBtn.className = 'chats-icon-btn cache-btn';
-    cacheBtn.title = 'مسح الكاش';
-    cacheBtn.innerHTML = '<i class="fas fa-broom"></i>';
-    cacheBtn.onclick = clearCache;
-    chatsActions.appendChild(cacheBtn);
-    
-    // زر إعادة تشغيل واتساب
-    var restartBtn = document.createElement('button');
-    restartBtn.className = 'chats-icon-btn restart-btn';
-    restartBtn.title = 'إعادة تشغيل واتساب';
-    restartBtn.innerHTML = '<i class="fas fa-redo"></i>';
-    restartBtn.onclick = restartWhatsApp;
-    chatsActions.appendChild(restartBtn);
   }
   
   // إضافة زر الإيموجي
@@ -1481,9 +1426,6 @@ window.onload = function() {
   
   // التحقق من حالة التطبيق كل 30 ثانية
   setInterval(checkAppStatus, 30000);
-  
-  // إظهار شاشة الانتظار
-  showScreen("login");
   
   // التحقق مما إذا كان المتصفح يدعم PWA
   if (window.matchMedia('(display-mode: standalone)').matches) {
