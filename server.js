@@ -43,7 +43,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB كحد أقصى
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
       'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
@@ -58,7 +58,6 @@ const upload = multer({
     if (allowedMimes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      // التحقق من الصيغ الخاصة
       const ext = path.extname(file.originalname).toLowerCase();
       const allowedExts = ['.3gp', '.gp3', '.pg3', '.heic', '.heif'];
       if (allowedExts.includes(ext)) {
@@ -95,7 +94,6 @@ async function setupDatabase() {
   try {
     console.log("🔧 جاري إعداد قاعدة البيانات...");
     
-    // اختبار الاتصال
     const client = await pool.connect();
     console.log('✅ تم الاتصال بقاعدة البيانات بنجاح');
     
@@ -197,7 +195,7 @@ let currentSessionId = null;
 
 // دالة لاستخراج الرقم من ID
 function extractNumberFromId(contactId) {
-  if (!contactId) return "غير معروف";
+  if (!contactId) return "جهة اتصال";
   
   if (contactId.includes('@g.us')) {
     return "مجموعة";
@@ -232,7 +230,7 @@ function cleanDisplayName(name, contactId) {
   return cleanName || extractNumberFromId(contactId);
 }
 
-// دالة للحصول على معلومات جهة الاتصال مع تخزين الصور
+// دالة للحصول على معلومات جهة الاتصال
 async function getContactInfo(contactId) {
   try {
     if (!client) return null;
@@ -262,17 +260,14 @@ async function getContactInfo(contactId) {
     try {
       const profilePicUrl = await client.getProfilePicUrl(contactId);
       if (profilePicUrl) {
-        // حفظ الصورة مؤقتاً
         const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.jpg`;
         const cachePath = path.join(cacheDir, cacheFileName);
         
-        // التحقق من وجود صورة مخبأة حديثاً
         if (fs.existsSync(cachePath)) {
           const stats = fs.statSync(cachePath);
           const now = new Date();
           const cacheAge = now - stats.mtime;
           
-          // تحديث الصورة إذا كانت عمرها أكثر من ساعة
           if (cacheAge > 3600000) {
             await downloadAndCacheImage(profilePicUrl, cachePath);
           }
@@ -386,347 +381,377 @@ async function getUserInfo() {
   }
 }
 
-// دالة لتهيئة واتساب
+// دالة لتهيئة واتساب مع إعادة المحاولة
 async function initWhatsApp(sessionId = null) {
-  console.log("🔧 جاري تشغيل واتساب...");
+  return new Promise(async (resolve, reject) => {
+    console.log("🔧 جاري تشغيل واتساب...");
 
-  if (client) {
-    try {
-      await client.destroy();
-    } catch (e) {
-      console.log("⚠️ خطأ في تدمير العميل السابق:", e.message);
+    if (client) {
+      try {
+        await client.destroy();
+      } catch (e) {
+        console.log("⚠️ خطأ في تدمير العميل السابق:", e.message);
+      }
     }
-  }
 
-  currentSessionId = sessionId || `session_${Date.now()}`;
+    currentSessionId = sessionId || `session_${Date.now()}`;
 
-  client = new Client({
-    authStrategy: new LocalAuth({
-      clientId: "zzapp-client",
-      dataPath: sessionsDir
-    }),
-    puppeteer: {
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-sync',
-        '--disable-translate',
-        '--disable-features=site-per-process',
-        '--window-size=1920,1080'
-      ]
-    },
-    takeoverOnConflict: false,
-    takeoverTimeoutMs: 0
-  });
+    client = new Client({
+      authStrategy: new LocalAuth({
+        clientId: "zzapp-client",
+        dataPath: sessionsDir
+      }),
+      puppeteer: {
+        headless: "new",
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--disable-translate',
+          '--disable-features=site-per-process',
+          '--window-size=1920,1080',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-site-isolation-trials',
+          '--disable-blink-features=AutomationControlled'
+        ],
+        ignoreHTTPSErrors: true,
+        timeout: 60000
+      },
+      takeoverOnConflict: false,
+      takeoverTimeoutMs: 0
+    });
 
-  client.on("qr", async (qr) => {
-    console.log("📱 يوجد كود QR");
-    try {
-      qrCode = await QRCode.toDataURL(qr);
+    client.on("qr", async (qr) => {
+      console.log("📱 يوجد كود QR");
+      try {
+        qrCode = await QRCode.toDataURL(qr);
+        
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_sessions (session_id, last_active, created_at)
+             VALUES ($1, NOW(), NOW())
+             ON CONFLICT (session_id) 
+             DO UPDATE SET last_active = NOW()`,
+            [currentSessionId]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في حفظ الجلسة:", dbError.message);
+        }
+        
+        io.emit("qr", { qr: qrCode, sessionId: currentSessionId });
+      } catch (e) {
+        console.log("❌ خطأ في إنشاء QR:", e.message);
+      }
+    });
+
+    client.on("authenticated", async () => {
+      console.log("✅ تم تسجيل الدخول");
+      qrCode = null;
       
       try {
         await pool.query(
-          `INSERT INTO zzapp_sessions (session_id, last_active, created_at)
-           VALUES ($1, NOW(), NOW())
-           ON CONFLICT (session_id) 
-           DO UPDATE SET last_active = NOW()`,
+          `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
           [currentSessionId]
         );
-      } catch (dbError) {
-        console.log("⚠️ خطأ في حفظ الجلسة:", dbError.message);
+      } catch (e) {
+        console.log("⚠️ خطأ في تحديث الجلسة:", e.message);
+      }
+    });
+
+    client.on("ready", async () => {
+      console.log("🚀 واتساب جاهز للاستخدام");
+      isReady = true;
+      qrCode = null;
+      
+      try {
+        userInfo = await getUserInfo();
+        console.log("👤 معلومات المستخدم:", userInfo.name);
+        
+        try {
+          await pool.query(
+            `UPDATE zzapp_sessions SET user_data = $1 WHERE session_id = $2`,
+            [JSON.stringify(userInfo), currentSessionId]
+          );
+        } catch (e) {
+          console.log("⚠️ خطأ في حفظ معلومات المستخدم:", e.message);
+        }
+        
+        io.emit("user_info", userInfo);
+      } catch (e) {
+        console.log("⚠️ خطأ في الحصول على معلومات المستخدم:", e.message);
+        userInfo = {
+          id: "unknown",
+          name: "المستخدم",
+          display_name: "المستخدم",
+          number: "unknown",
+          about: "",
+          pic: null,
+          pic_cached: false
+        };
+        io.emit("user_info", userInfo);
       }
       
-      io.emit("qr", { qr: qrCode, sessionId: currentSessionId });
-    } catch (e) {
-      console.log("❌ خطأ في إنشاء QR:", e.message);
-    }
-  });
+      io.emit("ready", { sessionId: currentSessionId });
+      
+      // تحميل المحادثات
+      try {
+        const chatsRes = await pool.query(
+          "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
+          [currentSessionId]
+        );
+        io.emit("chats", chatsRes.rows);
+      } catch (e) {
+        console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
+        io.emit("chats", []);
+      }
+      
+      resolve();
+    });
 
-  client.on("authenticated", async () => {
-    console.log("✅ تم تسجيل الدخول");
-    qrCode = null;
-    
-    try {
-      await pool.query(
-        `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
-        [currentSessionId]
-      );
-    } catch (e) {
-      console.log("⚠️ خطأ في تحديث الجلسة:", e.message);
-    }
-  });
+    client.on("message", async (msg) => {
+      try {
+        let chatId = msg.id.remote || msg.from;
+        let isGroup = chatId.includes('@g.us');
+        let contactInfo = await getContactInfo(chatId);
+        
+        // معالجة الوسائط
+        let mediaUrl = null;
+        let mediaType = null;
+        let mediaSize = 0;
+        let mediaName = null;
 
-  client.on("ready", async () => {
-    console.log("🚀 واتساب جاهز للاستخدام");
-    isReady = true;
-    qrCode = null;
-    
-    try {
-      userInfo = await getUserInfo();
-      console.log("👤 معلومات المستخدم:", userInfo.name);
+        if (msg.hasMedia) {
+          try {
+            const media = await msg.downloadMedia();
+            if (media) {
+              const timestamp = Date.now();
+              let fileName = '';
+              let ext = '';
+              
+              if (msg.type === 'image') {
+                mediaType = 'image';
+                ext = '.jpg';
+                fileName = `img_${timestamp}${ext}`;
+              } else if (msg.type === 'audio' || msg.type === 'ptt') {
+                mediaType = 'audio';
+                ext = '.ogg';
+                fileName = `audio_${timestamp}${ext}`;
+              } else if (msg.type === 'video') {
+                mediaType = 'video';
+                ext = '.mp4';
+                fileName = `video_${timestamp}${ext}`;
+              } else if (msg.type === 'document') {
+                mediaType = 'document';
+                ext = path.extname(msg.mediaFilename || 'file.bin');
+                fileName = `doc_${timestamp}${ext}`;
+              } else {
+                mediaType = msg.type;
+                fileName = `file_${timestamp}.bin`;
+              }
+              
+              const filePath = path.join(downloadsDir, fileName);
+              const buffer = Buffer.from(media.data, 'base64');
+              mediaSize = buffer.length;
+              
+              fs.writeFileSync(filePath, buffer);
+              mediaUrl = `/downloads/${fileName}`;
+              mediaName = msg.mediaFilename || fileName;
+            }
+          } catch (e) {
+            console.log("⚠️ خطأ في حفظ الوسائط:", e.message);
+          }
+        }
+
+        // حفظ الرسالة
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_messages 
+             (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
+              content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+             ON CONFLICT (message_id) DO NOTHING`,
+            [chatId, 
+             msg.id._serialized, 
+             currentSessionId,
+             msg.from,
+             contactInfo.display_name,
+             contactInfo.number,
+             msg.body || "[وسائط]", 
+             mediaUrl, 
+             mediaType,
+             mediaSize,
+             mediaName,
+             msg.fromMe]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
+        }
+
+        // تحديث المحادثة
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
+              updated_at, is_group, session_id, message_count, unread_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
+                    CASE WHEN $11 = true THEN 0 ELSE 1 END)
+             ON CONFLICT (id) 
+             DO UPDATE SET 
+               name = COALESCE($2, zzapp_chats.name),
+               display_name = COALESCE($3, zzapp_chats.display_name),
+               about = COALESCE($5, zzapp_chats.about),
+               pic = COALESCE($6, zzapp_chats.pic),
+               pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+               last_message = $8,
+               last_time = NOW(),
+               updated_at = NOW(),
+               message_count = zzapp_chats.message_count + 1,
+               unread_count = CASE WHEN $11 = true THEN zzapp_chats.unread_count 
+                                 ELSE zzapp_chats.unread_count + 1 END`,
+            [chatId, 
+             contactInfo.name,
+             contactInfo.display_name,
+             contactInfo.number,
+             contactInfo.about,
+             contactInfo.pic,
+             contactInfo.pic_cached,
+             msg.body || "[وسائط]",
+             isGroup,
+             currentSessionId,
+             msg.fromMe]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
+        }
+
+        // إرسال تحديث للعملاء
+        const chatData = { 
+          id: chatId, 
+          name: contactInfo.name,
+          display_name: contactInfo.display_name,
+          number: contactInfo.number,
+          about: contactInfo.about,
+          pic: contactInfo.pic,
+          pic_cached: contactInfo.pic_cached,
+          last_message: msg.body || "[وسائط]",
+          last_time: new Date().toISOString(),
+          is_group: isGroup,
+          session_id: currentSessionId
+        };
+        
+        io.emit("chat_update", chatData);
+
+        const messageData = { 
+          chat_id: chatId,
+          message_id: msg.id._serialized,
+          text: msg.body || "[وسائط]", 
+          media: mediaUrl,
+          media_type: mediaType,
+          media_name: mediaName,
+          timestamp: new Date().toISOString(),
+          is_from_me: msg.fromMe,
+          sender_name: contactInfo.display_name,
+          sender_number: contactInfo.number,
+          session_id: currentSessionId
+        };
+        
+        io.emit("message", messageData);
+
+      } catch (e) {
+        console.log("❌ خطأ في معالجة الرسالة:", e.message);
+      }
+    });
+
+    client.on("message_ack", async (msg, ack) => {
+      try {
+        await pool.query(
+          `UPDATE zzapp_messages 
+           SET delivered = $1, read_receipt = $2
+           WHERE message_id = $3`,
+          [ack >= 2, ack >= 3, msg.id._serialized]
+        );
+        
+        io.emit("message_status", {
+          message_id: msg.id._serialized,
+          delivered: ack >= 2,
+          read: ack >= 3
+        });
+      } catch (e) {
+        console.log("❌ خطأ في تحديث حالة الرسالة:", e.message);
+      }
+    });
+
+    client.on("disconnected", async (reason) => {
+      console.log("❌ انقطع الاتصال:", reason);
+      isReady = false;
       
       try {
         await pool.query(
-          `UPDATE zzapp_sessions SET user_data = $1 WHERE session_id = $2`,
-          [JSON.stringify(userInfo), currentSessionId]
+          `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
+          [currentSessionId]
         );
       } catch (e) {
-        console.log("⚠️ خطأ في حفظ معلومات المستخدم:", e.message);
+        console.log("⚠️ خطأ في تحديث الجلسة:", e.message);
       }
       
-      io.emit("user_info", userInfo);
-    } catch (e) {
-      console.log("⚠️ خطأ في الحصول على معلومات المستخدم:", e.message);
-      userInfo = {
-        id: "unknown",
-        name: "المستخدم",
-        display_name: "المستخدم",
-        number: "unknown",
-        about: "",
-        pic: null,
-        pic_cached: false
-      };
-      io.emit("user_info", userInfo);
-    }
-    
-    io.emit("ready", { sessionId: currentSessionId });
-    
-    // تحميل المحادثات
+      // إعادة التشغيل بعد 10 ثواني
+      setTimeout(() => {
+        console.log("🔄 إعادة تشغيل واتساب بعد انقطاع...");
+        initWhatsAppWithRetry(currentSessionId);
+      }, 10000);
+    });
+
+    client.on("auth_failure", (message) => {
+      console.log("❌ فشل المصادقة:", message);
+      isReady = false;
+      reject(new Error("فشل المصادقة: " + message));
+    });
+
     try {
-      const chatsRes = await pool.query(
-        "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
-        [currentSessionId]
-      );
-      io.emit("chats", chatsRes.rows);
-    } catch (e) {
-      console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
-      io.emit("chats", []);
+      await client.initialize();
+      console.log("✅ تم تشغيل واتساب بنجاح");
+    } catch (error) {
+      console.error("❌ فشل تشغيل واتساب:", error.message);
+      reject(error);
     }
   });
-
-  client.on("message", async (msg) => {
-    try {
-      let chatId = msg.id.remote || msg.from;
-      let isGroup = chatId.includes('@g.us');
-      let contactInfo = await getContactInfo(chatId);
-      
-      // معالجة الوسائط
-      let mediaUrl = null;
-      let mediaType = null;
-      let mediaSize = 0;
-      let mediaName = null;
-
-      if (msg.hasMedia) {
-        try {
-          const media = await msg.downloadMedia();
-          if (media) {
-            const timestamp = Date.now();
-            let fileName = '';
-            let ext = '';
-            
-            if (msg.type === 'image') {
-              mediaType = 'image';
-              ext = '.jpg';
-              fileName = `img_${timestamp}${ext}`;
-            } else if (msg.type === 'audio' || msg.type === 'ptt') {
-              mediaType = 'audio';
-              ext = '.ogg';
-              fileName = `audio_${timestamp}${ext}`;
-            } else if (msg.type === 'video') {
-              mediaType = 'video';
-              ext = '.mp4';
-              fileName = `video_${timestamp}${ext}`;
-            } else if (msg.type === 'document') {
-              mediaType = 'document';
-              ext = path.extname(msg.mediaFilename || 'file.bin');
-              fileName = `doc_${timestamp}${ext}`;
-            } else {
-              mediaType = msg.type;
-              fileName = `file_${timestamp}.bin`;
-            }
-            
-            const filePath = path.join(downloadsDir, fileName);
-            const buffer = Buffer.from(media.data, 'base64');
-            mediaSize = buffer.length;
-            
-            fs.writeFileSync(filePath, buffer);
-            mediaUrl = `/downloads/${fileName}`;
-            mediaName = msg.mediaFilename || fileName;
-          }
-        } catch (e) {
-          console.log("⚠️ خطأ في حفظ الوسائط:", e.message);
-        }
-      }
-
-      // حفظ الرسالة
-      try {
-        await pool.query(
-          `INSERT INTO zzapp_messages 
-           (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
-            content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-           ON CONFLICT (message_id) DO NOTHING`,
-          [chatId, 
-           msg.id._serialized, 
-           currentSessionId,
-           msg.from,
-           contactInfo.display_name,
-           contactInfo.number,
-           msg.body || "[وسائط]", 
-           mediaUrl, 
-           mediaType,
-           mediaSize,
-           mediaName,
-           msg.fromMe]
-        );
-      } catch (dbError) {
-        console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
-      }
-
-      // تحديث المحادثة
-      try {
-        await pool.query(
-          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
-            updated_at, is_group, session_id, message_count, unread_count)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
-                  CASE WHEN $11 = true THEN 0 ELSE 1 END)
-           ON CONFLICT (id) 
-           DO UPDATE SET 
-             name = COALESCE($2, zzapp_chats.name),
-             display_name = COALESCE($3, zzapp_chats.display_name),
-             about = COALESCE($5, zzapp_chats.about),
-             pic = COALESCE($6, zzapp_chats.pic),
-             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
-             last_message = $8,
-             last_time = NOW(),
-             updated_at = NOW(),
-             message_count = zzapp_chats.message_count + 1,
-             unread_count = CASE WHEN $11 = true THEN zzapp_chats.unread_count 
-                               ELSE zzapp_chats.unread_count + 1 END`,
-          [chatId, 
-           contactInfo.name,
-           contactInfo.display_name,
-           contactInfo.number,
-           contactInfo.about,
-           contactInfo.pic,
-           contactInfo.pic_cached,
-           msg.body || "[وسائط]",
-           isGroup,
-           currentSessionId,
-           msg.fromMe]
-        );
-      } catch (dbError) {
-        console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
-      }
-
-      // إرسال تحديث للعملاء
-      const chatData = { 
-        id: chatId, 
-        name: contactInfo.name,
-        display_name: contactInfo.display_name,
-        number: contactInfo.number,
-        about: contactInfo.about,
-        pic: contactInfo.pic,
-        pic_cached: contactInfo.pic_cached,
-        last_message: msg.body || "[وسائط]",
-        last_time: new Date().toISOString(),
-        is_group: isGroup,
-        session_id: currentSessionId
-      };
-      
-      io.emit("chat_update", chatData);
-
-      const messageData = { 
-        chat_id: chatId,
-        message_id: msg.id._serialized,
-        text: msg.body || "[وسائط]", 
-        media: mediaUrl,
-        media_type: mediaType,
-        media_name: mediaName,
-        timestamp: new Date().toISOString(),
-        is_from_me: msg.fromMe,
-        sender_name: contactInfo.display_name,
-        sender_number: contactInfo.number,
-        session_id: currentSessionId
-      };
-      
-      io.emit("message", messageData);
-
-    } catch (e) {
-      console.log("❌ خطأ في معالجة الرسالة:", e.message);
-    }
-  });
-
-  client.on("message_ack", async (msg, ack) => {
-    try {
-      await pool.query(
-        `UPDATE zzapp_messages 
-         SET delivered = $1, read_receipt = $2
-         WHERE message_id = $3`,
-        [ack >= 2, ack >= 3, msg.id._serialized]
-      );
-      
-      io.emit("message_status", {
-        message_id: msg.id._serialized,
-        delivered: ack >= 2,
-        read: ack >= 3
-      });
-    } catch (e) {
-      console.log("❌ خطأ في تحديث حالة الرسالة:", e.message);
-    }
-  });
-
-  client.on("disconnected", async (reason) => {
-    console.log("❌ انقطع الاتصال:", reason);
-    isReady = false;
-    
-    try {
-      await pool.query(
-        `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
-        [currentSessionId]
-      );
-    } catch (e) {
-      console.log("⚠️ خطأ في تحديث الجلسة:", e.message);
-    }
-    
-    setTimeout(() => {
-      initWhatsApp(currentSessionId);
-    }, 10000);
-  });
-
-  client.on("auth_failure", (message) => {
-    console.log("❌ فشل المصادقة:", message);
-    isReady = false;
-  });
-
-  try {
-    await client.initialize();
-    console.log("✅ تم تشغيل واتساب بنجاح");
-  } catch (error) {
-    console.error("❌ فشل تشغيل واتساب:", error);
-    
-    setTimeout(() => {
-      console.log("🔄 إعادة المحاولة...");
-      initWhatsApp(currentSessionId);
-    }, 10000);
-  }
 }
 
-// بدء واتساب
-setTimeout(() => {
-  initWhatsApp();
-}, 1000);
+// دالة لإعادة المحاولة مع زيادة التباعد
+async function initWhatsAppWithRetry(sessionId = null, retries = 10, delay = 10000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      console.log(`🔄 محاولة تشغيل واتساب (${i + 1}/${retries})...`);
+      await initWhatsApp(sessionId);
+      console.log("✅ نجحت محاولة تشغيل واتساب");
+      return;
+    } catch (error) {
+      console.error(`❌ فشلت المحاولة ${i + 1}/${retries}:`, error.message);
+      
+      if (i < retries - 1) {
+        const nextDelay = delay * (i + 1); // زيادة التباعد مع كل محاولة
+        console.log(`⏳ الانتظار ${nextDelay/1000} ثانية قبل المحاولة التالية...`);
+        await new Promise(resolve => setTimeout(resolve, nextDelay));
+      } else {
+        console.error("❌ استنفذت جميع محاولات التشغيل. إعادة المحاولة بعد دقيقة...");
+        setTimeout(() => {
+          initWhatsAppWithRetry(sessionId, retries, delay);
+        }, 60000);
+        break;
+      }
+    }
+  }
+}
 
 /* ================= SOCKET.IO ================= */
 io.on("connection", async (socket) => {
@@ -910,8 +935,8 @@ io.on("connection", async (socket) => {
       const stats = fs.statSync(mediaPath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       
-      if (fileSizeInMB > 50) {
-        socket.emit("error", "حجم الملف كبير جداً (50MB كحد أقصى)");
+      if (fileSizeInMB > 100) {
+        socket.emit("error", "حجم الملف كبير جداً (100MB كحد أقصى)");
         return;
       }
 
@@ -1116,7 +1141,7 @@ io.on("connection", async (socket) => {
         console.log("👋 تم تسجيل الخروج وحذف الجلسة");
         
         setTimeout(() => {
-          initWhatsApp();
+          initWhatsAppWithRetry();
         }, 3000);
       }
     } catch (error) {
@@ -1216,7 +1241,8 @@ app.get("/status", (req, res) => {
   res.json({
     isReady: isReady,
     hasQr: !!qrCode,
-    sessionId: currentSessionId
+    sessionId: currentSessionId,
+    status: isReady ? "ready" : qrCode ? "qr" : "waiting"
   });
 });
 
@@ -1235,12 +1261,14 @@ app.get("/manifest.json", (req, res) => {
       {
         "src": "/icon-192x192.png",
         "sizes": "192x192",
-        "type": "image/png"
+        "type": "image/png",
+        "purpose": "any maskable"
       },
       {
         "src": "/icon-512x512.png",
         "sizes": "512x512",
-        "type": "image/png"
+        "type": "image/png",
+        "purpose": "any maskable"
       }
     ],
     "categories": ["social", "communication"],
@@ -1260,7 +1288,7 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache-v3').then(cache => {
+    caches.open('zzapp-cache-v4').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
@@ -1268,17 +1296,8 @@ self.addEventListener('install', event => {
         '/app.js',
         '/icon-192x192.png',
         '/icon-512x512.png',
-        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css',
-        'https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap'
+        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
       ]);
-    })
-  );
-});
-
-self.addEventListener('fetch', event => {
-  event.respondWith(
-    caches.match(event.request).then(response => {
-      return response || fetch(event.request);
     })
   );
 });
@@ -1287,12 +1306,47 @@ self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(cacheNames => {
       return Promise.all(
-        cacheNames.filter(cacheName => {
-          return cacheName.startsWith('zzapp-cache-') && cacheName !== 'zzapp-cache-v3';
-        }).map(cacheName => {
-          return caches.delete(cacheName);
+        cacheNames.map(cacheName => {
+          if (cacheName !== 'zzapp-cache-v4') {
+            return caches.delete(cacheName);
+          }
         })
       );
+    })
+  );
+});
+
+self.addEventListener('fetch', event => {
+  if (event.request.url.includes('/downloads/') || 
+      event.request.url.includes('/uploads/') ||
+      event.request.url.includes('/cache/')) {
+    event.respondWith(
+      caches.match(event.request).then(response => {
+        return response || fetch(event.request);
+      })
+    );
+    return;
+  }
+
+  event.respondWith(
+    caches.match(event.request).then(response => {
+      if (response) {
+        return response;
+      }
+      return fetch(event.request).then(response => {
+        if (!response || response.status !== 200 || response.type !== 'basic') {
+          return response;
+        }
+        const responseToCache = response.clone();
+        caches.open('zzapp-cache-v4').then(cache => {
+          cache.put(event.request, responseToCache);
+        });
+        return response;
+      });
+    }).catch(() => {
+      if (event.request.mode === 'navigate') {
+        return caches.match('/index.html');
+      }
     })
   );
 });
@@ -1315,6 +1369,17 @@ app.post("/clear-cache", (req, res) => {
   }
 });
 
+// روت لفحص صحة التطبيق
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    whatsapp: isReady ? "ready" : qrCode ? "qr" : "waiting",
+    database: "connected",
+    uptime: process.uptime()
+  });
+});
+
 // الصفحة الرئيسية
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -1331,6 +1396,11 @@ server.listen(PORT, () => {
   console.log("📱 واجهة متوافقة مع الهواتف القديمة والزرارية");
   console.log("🌐 افتح المتصفح على: http://localhost:" + PORT);
   console.log("📱 التطبيق متاح للتثبيت كمتصفح PWA");
+  
+  // بدء واتساب بعد تأخير قصير
+  setTimeout(() => {
+    initWhatsAppWithRetry();
+  }, 2000);
 });
 
 // معالجة الأخطاء
