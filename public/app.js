@@ -8,10 +8,19 @@ var audioChunks = [];
 var recordingTimer = null;
 var recordingStartTime = null;
 var currentUser = null;
+var currentSessionId = null;
+var emojiHistory = JSON.parse(localStorage.getItem('emojiHistory')) || [];
 
 // أحداث السوكيت
 socket.on("connect", function() {
   console.log("✅ متصل بالسيرفر");
+  
+  // محاولة استعادة الجلسة
+  const savedSession = localStorage.getItem('whatsapp_session');
+  if (savedSession) {
+    socket.emit("restore_session", savedSession);
+  }
+  
   showNotification("متصل بالسيرفر", "success");
 });
 
@@ -21,18 +30,38 @@ socket.on("waiting", function() {
   document.getElementById("status").innerHTML = "جارٍ الاتصال...";
 });
 
-socket.on("qr", function(qr) {
+socket.on("qr", function(data) {
   console.log("📱 كود QR متاح");
   showScreen("login");
-  document.getElementById("qr").src = qr;
+  document.getElementById("qr").src = data.qr;
   document.getElementById("status").innerHTML = "مسح الكود للدخول";
+  
+  // حفظ معرف الجلسة
+  if (data.sessionId) {
+    currentSessionId = data.sessionId;
+    localStorage.setItem('whatsapp_session', data.sessionId);
+  }
 });
 
-socket.on("ready", function() {
+socket.on("ready", function(data) {
   console.log("🚀 جاهز للاستخدام");
   showScreen("chats");
+  
+  if (data.sessionId) {
+    currentSessionId = data.sessionId;
+    localStorage.setItem('whatsapp_session', data.sessionId);
+  }
+  
   loadChats();
   showNotification("تم الاتصال بواتساب", "success");
+});
+
+socket.on("session_restored", function(data) {
+  console.log("🔓 تم استعادة الجلسة");
+  currentSessionId = data.sessionId;
+  showScreen("chats");
+  loadChats();
+  showNotification("تم استعادة الجلسة السابقة", "info");
 });
 
 socket.on("user_info", function(user) {
@@ -45,6 +74,11 @@ socket.on("user_info", function(user) {
   // عرض صورة المستخدم إذا كانت متوفرة
   var userAvatar = document.getElementById("user-avatar");
   updateAvatar(userAvatar, user.pic, user.name || user.number);
+  
+  // عرض البايو إذا كان موجوداً
+  if (user.about) {
+    document.getElementById("user-name").title = user.about;
+  }
 });
 
 socket.on("chats", function(chats) {
@@ -66,14 +100,25 @@ socket.on("new_chat_started", function(chat) {
 
 socket.on("message", function(data) {
   console.log("📩 رسالة جديدة");
-  if (currentChat && data.from === currentChat) {
-    showMessage(data, data.self);
-    scrollToBottom();
-    playMessageSound();
+  
+  // التحقق من أن الرسالة تنتمي للجلسة الحالية
+  if (data.session_id !== currentSessionId) return;
+  
+  if (currentChat && data.chat_id === currentChat) {
+    // التحقق من عدم وجود الرسالة مسبقاً
+    if (!isMessageExists(data.message_id)) {
+      showMessage(data, data.is_from_me);
+      scrollToBottom();
+      playMessageSound();
+    }
   }
   
   // تحديث معاينة المحادثة
-  updateChatPreview(data.from, data.text || "[وسائط]", new Date().toISOString());
+  updateChatPreview(data.chat_id, data.text || "[وسائط]", new Date().toISOString());
+});
+
+socket.on("message_status", function(data) {
+  updateMessageStatus(data.message_id, data.delivered, data.read);
 });
 
 socket.on("load_messages", function(messages) {
@@ -97,11 +142,34 @@ socket.on("disconnect", function() {
 });
 
 socket.on("logged_out", function() {
+  localStorage.removeItem('whatsapp_session');
+  currentSessionId = null;
   showNotification("تم تسجيل الخروج", "info");
   setTimeout(() => {
     location.reload();
   }, 2000);
 });
+
+// التحقق من وجود الرسالة
+function isMessageExists(messageId) {
+  const container = document.getElementById("messages-container");
+  return container.querySelector(`[data-message-id="${messageId}"]`) !== null;
+}
+
+// تحديث حالة الرسالة
+function updateMessageStatus(messageId, delivered, read) {
+  const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+  if (messageElement) {
+    const statusElement = messageElement.querySelector('.message-status');
+    if (statusElement) {
+      if (read) {
+        statusElement.innerHTML = '✓✓ <span style="color:#34B7F1">✓</span>';
+      } else if (delivered) {
+        statusElement.innerHTML = '✓✓';
+      }
+    }
+  }
+}
 
 // تحديث الصورة
 function updateAvatar(element, picUrl, name) {
@@ -125,12 +193,20 @@ function showScreen(screenName) {
     document.getElementById(screen).classList.remove("active");
   });
   document.getElementById(screenName).classList.add("active");
+  
+  // إخفاء منتقي الإيموجي عند تغيير الشاشة
+  hideEmojiPicker();
 }
 
 // تحميل المحادثات
 function loadChats() {
+  if (!currentSessionId) {
+    console.log("❌ لا يوجد جلسة نشطة");
+    return;
+  }
+  
   showLoading(true);
-  fetch('/chats')
+  fetch(`/chats/${currentSessionId}`)
     .then(function(response) { 
       if (!response.ok) throw new Error('فشل تحميل المحادثات');
       return response.json(); 
@@ -193,6 +269,7 @@ function addChatItem(chat) {
   var div = document.createElement("div");
   div.className = "chat-item";
   div.setAttribute('data-id', chat.id);
+  div.setAttribute('data-session', chat.session_id);
   div.onclick = function() { openChat(chat); };
   
   var lastMsg = chat.last_message || "لا توجد رسائل بعد";
@@ -204,10 +281,14 @@ function addChatItem(chat) {
   var unreadCount = chat.unread_count || 0;
   var initials = getInitials(chat.name || chat.number || "?");
   
-  // عرض الاسم والرقم معاً
+  // عرض الاسم والرقم والبايو
   var displayName = chat.name || chat.number || "مستخدم";
-  if (chat.name && chat.number && chat.name !== chat.number) {
-    displayName = `${chat.name}<br><small>${chat.number}</small>`;
+  var displayInfo = displayName;
+  
+  if (chat.about && chat.about.trim() !== "") {
+    displayInfo = `${displayName}<br><small class="chat-about">${chat.about}</small>`;
+  } else if (chat.number && displayName !== chat.number) {
+    displayInfo = `${displayName}<br><small>${chat.number}</small>`;
   }
   
   div.innerHTML = `
@@ -218,7 +299,7 @@ function addChatItem(chat) {
     </div>
     <div class="chat-info">
       <div class="chat-header">
-        <div class="chat-name">${displayName}</div>
+        <div class="chat-name">${displayInfo}</div>
         <div class="chat-time">${time}</div>
       </div>
       <div class="chat-preview">
@@ -244,7 +325,7 @@ function addChatItem(chat) {
 // تحديث المحادثة في القائمة
 function updateChatInList(chat) {
   var container = document.getElementById("chats-list");
-  var existing = container.querySelector(`.chat-item[data-id="${chat.id}"]`);
+  var existing = container.querySelector(`.chat-item[data-id="${chat.id}"][data-session="${chat.session_id}"]`);
   
   if (existing) {
     container.removeChild(existing);
@@ -256,7 +337,7 @@ function updateChatInList(chat) {
 
 // تحديث معاينة المحادثة
 function updateChatPreview(chatId, lastMessage, timestamp) {
-  var chatItem = document.querySelector(`.chat-item[data-id="${chatId}"]`);
+  var chatItem = document.querySelector(`.chat-item[data-id="${chatId}"][data-session="${currentSessionId}"]`);
   if (chatItem) {
     var lastMsgEl = chatItem.querySelector('.chat-last');
     var timeEl = chatItem.querySelector('.chat-time');
@@ -282,7 +363,6 @@ function updateChatPreview(chatId, lastMessage, timestamp) {
 function getInitials(name) {
   if (!name || name.trim() === "") return "?";
   
-  // إزالة الأرقام من الاسم
   var cleanName = name.replace(/[0-9]/g, '').trim();
   if (cleanName === "") return name.substring(0, 2);
   
@@ -340,8 +420,15 @@ function openChat(chat) {
   var contactName = chat.name || chat.number || "مستخدم";
   document.getElementById("chat-contact-name").textContent = contactName;
   
-  // عرض الاسم والرقم في الحالة
-  var statusText = chat.is_group ? "مجموعة" : chat.number || "مستقبل الرسائل";
+  // عرض البايو إذا كان موجوداً
+  var statusText = "";
+  if (chat.about && chat.about.trim() !== "") {
+    statusText = chat.about;
+  } else if (chat.is_group) {
+    statusText = "مجموعة";
+  } else {
+    statusText = chat.number || "مستقبل الرسائل";
+  }
   document.getElementById("chat-contact-status").textContent = statusText;
   
   // عرض صورة جهة الاتصال
@@ -361,14 +448,16 @@ function openChat(chat) {
   document.getElementById("send-btn").disabled = false;
   
   // طلب الرسائل
-  socket.emit("get_messages", chat.id);
+  socket.emit("get_messages", { 
+    chatId: chat.id, 
+    sessionId: currentSessionId 
+  });
   
   // التركيز على حقل الإدخال
   setTimeout(() => {
     var input = document.getElementById("message-input");
     if (input) {
       input.focus();
-      // وضع المؤشر في نهاية النص
       input.setSelectionRange(input.value.length, input.value.length);
     }
   }, 500);
@@ -385,6 +474,9 @@ function goBack() {
   if (isRecording) {
     stopRecording();
   }
+  
+  // إخفاء منتقي الإيموجي
+  hideEmojiPicker();
   
   // إعادة تحميل المحادثات
   loadChats();
@@ -421,13 +513,17 @@ function showMessages(messages) {
     }
     
     showMessage({
+      message_id: msg.message_id,
       text: msg.content,
       media: msg.media_url,
       media_type: msg.media_type,
+      media_name: msg.media_name,
       timestamp: msg.timestamp,
-      self: msg.is_from_me,
+      is_from_me: msg.is_from_me,
       sender_name: msg.sender_name,
-      sender_id: msg.sender_id
+      sender_number: msg.sender_number,
+      delivered: msg.delivered,
+      read_receipt: msg.read_receipt
     }, msg.is_from_me);
   });
 }
@@ -454,23 +550,16 @@ function showMessage(data, isSelf) {
   var container = document.getElementById("messages-container");
   var div = document.createElement("div");
   div.className = "message" + (isSelf ? " outgoing" : " incoming");
+  div.setAttribute('data-message-id', data.message_id || 'temp_' + Date.now());
   
   var time = formatTime(data.timestamp);
   var content = "";
   
   // اسم المرسل (للمجموعات)
   if (data.sender_name && !isSelf && data.sender_name !== "أنا") {
-    // استخراج الرقم من المعرف
-    var senderNumber = data.sender_id ? 
-      data.sender_id.replace('@c.us', '')
-                   .replace('@lid', '')
-                   .replace('@g.us', '')
-                   .replace('@s.whatsapp.net', '') : 
-      "";
-    
     var displayName = data.sender_name;
-    if (senderNumber && data.sender_name !== senderNumber) {
-      displayName = `${data.sender_name}<br><small>${senderNumber}</small>`;
+    if (data.sender_number && data.sender_name !== data.sender_number) {
+      displayName = `${data.sender_name}<br><small>${data.sender_number}</small>`;
     }
     
     content += '<div class="sender-name">' + displayName + '</div>';
@@ -485,6 +574,9 @@ function showMessage(data, isSelf) {
     } else if (data.media_type === 'video') {
       content += '<div class="message-video"><video controls><source src="' + data.media + '"></video></div>';
     } else if (data.media_type === 'document') {
+      var fileName = data.media_name || 'ملف مرفق';
+      content += '<div class="message-document"><a href="' + data.media + '" download="' + fileName + '"><i class="fas fa-file"></i> ' + fileName + '</a></div>';
+    } else {
       content += '<div class="message-document"><a href="' + data.media + '" download><i class="fas fa-file"></i> ملف مرفق</a></div>';
     }
   }
@@ -498,7 +590,13 @@ function showMessage(data, isSelf) {
   content += '<div class="message-meta">';
   content += '<div class="message-time">' + time + '</div>';
   if (isSelf) {
-    content += '<div class="message-status">✓✓</div>';
+    var statusIcon = '✓';
+    if (data.read_receipt) {
+      statusIcon = '✓✓ <span style="color:#34B7F1">✓</span>';
+    } else if (data.delivered) {
+      statusIcon = '✓✓';
+    }
+    content += '<div class="message-status">' + statusIcon + '</div>';
   }
   content += '</div>';
   
@@ -511,21 +609,10 @@ function sendMessage() {
   var input = document.getElementById("message-input");
   var text = input.value.trim();
   
-  if (!text || !currentChat) {
+  if (!text || !currentChat || !currentSessionId) {
     showNotification("اكتب رسالة أولاً", "warning");
     return;
   }
-  
-  // إضافة رسالة مؤقتة
-  var tempMessage = {
-    text: text,
-    timestamp: new Date().toISOString(),
-    self: true,
-    sender_name: "أنا"
-  };
-  
-  showMessage(tempMessage, true);
-  scrollToBottom();
   
   // إرسال الرسالة عبر السوكيت
   socket.emit("send_message", {
@@ -539,11 +626,14 @@ function sendMessage() {
   
   // تشغيل صوت الإرسال
   playSendSound();
+  
+  // إخفاء منتقي الإيموجي
+  hideEmojiPicker();
 }
 
 // إرسال رسالة صوتية
 function sendVoiceMessage(filePath) {
-  if (!currentChat) {
+  if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
     return;
   }
@@ -558,31 +648,34 @@ function sendVoiceMessage(filePath) {
   showNotification("تم إرسال الرسالة الصوتية", "success");
 }
 
-// بدء تسجيل صوتي - إصلاح المشكلة
+// بدء تسجيل صوتي
 function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showNotification("المتصفح لا يدعم التسجيل الصوتي", "error");
     return;
   }
   
-  if (!currentChat) {
+  if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
     return;
   }
   
-  // طلب إذن الميكروفون
   navigator.mediaDevices.getUserMedia({ 
-    audio: true
+    audio: {
+      channelCount: 1,
+      sampleRate: 44100,
+      echoCancellation: true,
+      noiseSuppression: true
+    }
   })
     .then(function(stream) {
       isRecording = true;
       audioChunks = [];
       
-      // استخدم MIME type مدعوم
-      const options = { mimeType: 'audio/webm' };
-      if (!MediaRecorder.isTypeSupported('audio/webm')) {
-        options.mimeType = 'audio/ogg; codecs=opus';
-      }
+      const options = { 
+        mimeType: 'audio/webm;codecs=opus',
+        audioBitsPerSecond: 128000
+      };
       
       try {
         mediaRecorder = new MediaRecorder(stream, options);
@@ -597,9 +690,12 @@ function startRecording() {
       };
       
       mediaRecorder.onstop = function() {
-        var audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-        var reader = new FileReader();
+        var audioBlob = new Blob(audioChunks, { 
+          type: mediaRecorder.mimeType || 'audio/webm' 
+        });
         
+        // تحويل إلى ogg
+        var reader = new FileReader();
         reader.onloadend = function() {
           var base64data = reader.result;
           var fileName = 'voice_' + Date.now() + '.ogg';
@@ -619,7 +715,7 @@ function startRecording() {
       };
       
       // بدء التسجيل
-      mediaRecorder.start();
+      mediaRecorder.start(100); // جمع البيانات كل 100ms
       recordingStartTime = Date.now();
       
       // تحديث واجهة التسجيل
@@ -696,7 +792,7 @@ function cancelRecording() {
 
 // التبديل بين التسجيل والإدخال
 function toggleRecord() {
-  if (!currentChat) {
+  if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
     return;
   }
@@ -720,8 +816,8 @@ function updateRecordingTimer() {
   var timerText = (minutes < 10 ? '0' : '') + minutes + ":" + (seconds < 10 ? '0' : '') + seconds;
   document.getElementById("recording-timer").textContent = timerText;
   
-  // إيقاف التسجيل تلقائياً بعد 2 دقيقة
-  if (minutes >= 2) {
+  // إيقاف التسجيل تلقائياً بعد 5 دقائق
+  if (minutes >= 5) {
     stopRecording();
   }
 }
@@ -742,6 +838,144 @@ function stopVisualizer() {
     bar.style.animation = 'none';
     bar.style.height = '10px';
   });
+}
+
+// إظهار منتقي الإيموجي
+function showEmojiPicker() {
+  var pickerContainer = document.getElementById("emoji-picker-container");
+  if (pickerContainer.style.display === "block") {
+    hideEmojiPicker();
+    return;
+  }
+  
+  pickerContainer.style.display = "block";
+  
+  // تحميل الإيموجيات
+  loadEmojis();
+}
+
+// إخفاء منتقي الإيموجي
+function hideEmojiPicker() {
+  var pickerContainer = document.getElementById("emoji-picker-container");
+  pickerContainer.style.display = "none";
+}
+
+// تحميل الإيموجيات
+function loadEmojis() {
+  var emojiPicker = document.getElementById("emoji-picker");
+  emojiPicker.innerHTML = "";
+  
+  // الإيموجيات الشائعة
+  var commonEmojis = [
+    "😀", "😂", "🥰", "😎", "😜", "😢", "😠", "😍", "🤔", "👍",
+    "👎", "👋", "🎉", "❤️", "🔥", "⭐", "🙏", "💯", "👏", "🤝",
+    "😊", "🤗", "😇", "😘", "😋", "🤪", "😎", "🤓", "🥳", "😴",
+    "😭", "😤", "🤯", "😱", "🥺", "😈", "🤡", "💩", "👻", "🙈",
+    "💪", "🧠", "👀", "👅", "👂", "👃", "💋", "🦶", "👄", "🦷"
+  ];
+  
+  // قسم الإيموجيات المستخدمة مؤخراً
+  if (emojiHistory.length > 0) {
+    var recentSection = document.createElement("div");
+    recentSection.className = "emoji-section";
+    recentSection.innerHTML = "<h4>مستخدمة مؤخراً</h4>";
+    
+    var recentContainer = document.createElement("div");
+    recentContainer.className = "emoji-grid";
+    
+    emojiHistory.slice(0, 12).forEach(function(emoji) {
+      var span = createEmojiElement(emoji);
+      recentContainer.appendChild(span);
+    });
+    
+    recentSection.appendChild(recentContainer);
+    emojiPicker.appendChild(recentSection);
+  }
+  
+  // قسم الإيموجيات الشائعة
+  var commonSection = document.createElement("div");
+  commonSection.className = "emoji-section";
+  commonSection.innerHTML = "<h4>إيموجيات شائعة</h4>";
+  
+  var commonContainer = document.createElement("div");
+  commonContainer.className = "emoji-grid";
+  
+  commonEmojis.forEach(function(emoji) {
+    var span = createEmojiElement(emoji);
+    commonContainer.appendChild(span);
+  });
+  
+  commonSection.appendChild(commonContainer);
+  emojiPicker.appendChild(commonSection);
+  
+  // قسم كل الإيموجيات (مجمعة حسب النوع)
+  var emojiCategories = {
+    "وجوه": ["😀", "😂", "🥰", "😎", "😜", "😢", "😠", "😍", "🤔", "😊", "🤗", "😇", "😘", "😋"],
+    "إيماءات": ["👍", "👎", "👋", "🙏", "👏", "🤝", "💪", "👀", "🤞", "✌️"],
+    "قلوب": ["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔"],
+    "أشياء": ["🔥", "⭐", "🎉", "💯", "🎁", "🎈", "🎊", "🏆", "⚽", "🎮"],
+    "حيوانات": ["🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯"],
+    "طعام": ["🍎", "🍕", "🍔", "🍟", "🍦", "🍫", "🍩", "🍵", "☕", "🍺"]
+  };
+  
+  for (var category in emojiCategories) {
+    var section = document.createElement("div");
+    section.className = "emoji-section";
+    section.innerHTML = "<h4>" + category + "</h4>";
+    
+    var container = document.createElement("div");
+    container.className = "emoji-grid";
+    
+    emojiCategories[category].forEach(function(emoji) {
+      var span = createEmojiElement(emoji);
+      container.appendChild(span);
+    });
+    
+    section.appendChild(container);
+    emojiPicker.appendChild(section);
+  }
+}
+
+// إنشاء عنصر إيموجي
+function createEmojiElement(emoji) {
+  var span = document.createElement("span");
+  span.className = "emoji-item";
+  span.textContent = emoji;
+  span.onclick = function() {
+    insertEmoji(emoji);
+  };
+  return span;
+}
+
+// إدخال إيموجي في حقل النص
+function insertEmoji(emoji) {
+  var input = document.getElementById("message-input");
+  var start = input.selectionStart;
+  var end = input.selectionEnd;
+  
+  input.value = input.value.substring(0, start) + emoji + input.value.substring(end);
+  input.focus();
+  input.setSelectionRange(start + emoji.length, start + emoji.length);
+  
+  // إضافة الإيموجي للسجل
+  addToEmojiHistory(emoji);
+}
+
+// إضافة إيموجي للسجل
+function addToEmojiHistory(emoji) {
+  // إزالة الإيموجي إذا كانت موجودة مسبقاً
+  emojiHistory = emojiHistory.filter(e => e !== emoji);
+  
+  // إضافة الإيموجي في البداية
+  emojiHistory.unshift(emoji);
+  
+  // الحفاظ على 20 إيموجي فقط
+  if (emojiHistory.length > 20) {
+    emojiHistory = emojiHistory.slice(0, 20);
+  }
+  
+  // حفظ في localStorage
+  localStorage.setItem('emojiHistory', JSON.stringify(emojiHistory));
 }
 
 // محادثة جديدة
@@ -765,7 +999,6 @@ function createNewChat() {
     return;
   }
   
-  // تنظيف الرقم
   phoneNumber = phoneNumber.replace(/\D/g, '');
   
   if (phoneNumber.length < 10) {
@@ -774,15 +1007,12 @@ function createNewChat() {
     return;
   }
   
-  // إضافة رمز الدولي لمصر إذا لم يكن موجوداً
   if (phoneNumber.length === 10 && !phoneNumber.startsWith('2')) {
     phoneNumber = '2' + phoneNumber;
   }
   
-  // إرسال طلب بدء محادثة
   socket.emit("start_new_chat", phoneNumber);
   
-  // إغلاق النافذة
   closeNewChat();
   showNotification("جارٍ بدء المحادثة...", "info");
 }
@@ -818,32 +1048,42 @@ function searchChats(query) {
   });
 }
 
-// إرسال صورة
+// إرسال صورة أو ملف
 function attachImage() {
-  if (!currentChat) {
+  if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
     return;
   }
   
   var input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'image/*';
-  input.capture = 'camera';
+  input.accept = 'image/*,video/*,audio/*,application/*,.pdf,.doc,.docx,.txt';
+  input.multiple = false;
   
   input.onchange = function(e) {
     var file = e.target.files[0];
     if (!file) return;
     
-    // التحقق من حجم الملف (10MB كحد أقصى)
-    if (file.size > 10 * 1024 * 1024) {
-      showNotification("حجم الصورة كبير جداً (10MB كحد أقصى)", "error");
+    // تحديد نوع الملف
+    var mediaType = 'document';
+    if (file.type.startsWith('image/')) {
+      mediaType = 'image';
+    } else if (file.type.startsWith('video/')) {
+      mediaType = 'video';
+    } else if (file.type.startsWith('audio/')) {
+      mediaType = 'audio';
+    }
+    
+    // التحقق من حجم الملف (50MB كحد أقصى)
+    if (file.size > 50 * 1024 * 1024) {
+      showNotification("حجم الملف كبير جداً (50MB كحد أقصى)", "error");
       return;
     }
     
     var formData = new FormData();
     formData.append('file', file);
     
-    showNotification("جارٍ رفع الصورة...", "info");
+    showNotification("جارٍ رفع الملف...", "info");
     
     fetch('/upload', {
       method: 'POST',
@@ -855,17 +1095,17 @@ function attachImage() {
         socket.emit("send_media", {
           to: currentChat,
           filePath: result.filePath,
-          mediaType: 'image',
+          mediaType: mediaType,
           caption: ''
         });
-        showNotification("تم إرسال الصورة", "success");
+        showNotification("تم إرسال الملف", "success");
       } else {
-        showNotification("فشل رفع الصورة", "error");
+        showNotification("فشل رفع الملف: " + (result.error || ""), "error");
       }
     })
     .catch(function(error) {
-      console.error('فشل رفع الصورة:', error);
-      showNotification("فشل إرسال الصورة", "error");
+      console.error('فشل رفع الملف:', error);
+      showNotification("فشل إرسال الملف", "error");
     });
   };
   
@@ -933,7 +1173,7 @@ function playSendSound() {
 
 // تسجيل الخروج
 function logout() {
-  if (confirm("هل تريد تسجيل الخروج من واتساب؟")) {
+  if (confirm("هل تريد تسجيل الخروج من واتساب؟ سيتم حذف جميع المحادثات المحفوظة.")) {
     socket.emit("logout");
     showNotification("جارٍ تسجيل الخروج...", "info");
   }
@@ -954,6 +1194,46 @@ window.onload = function() {
     });
   }
   
+  // تسجيل Service Worker للتطبيق
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service-worker.js')
+      .then(function(registration) {
+        console.log('✅ Service Worker مسجل:', registration.scope);
+      })
+      .catch(function(error) {
+        console.log('❌ فشل تسجيل Service Worker:', error);
+      });
+  }
+  
+  // إظهار زر التثبيت للتطبيق
+  let deferredPrompt;
+  
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    
+    // إظهار زر التثبيت
+    var installBtn = document.createElement('button');
+    installBtn.className = 'chats-icon-btn';
+    installBtn.title = 'تثبيت التطبيق';
+    installBtn.innerHTML = '<i class="fas fa-download"></i>';
+    installBtn.onclick = function() {
+      deferredPrompt.prompt();
+      deferredPrompt.userChoice.then((choiceResult) => {
+        if (choiceResult.outcome === 'accepted') {
+          console.log('✅ تم تثبيت التطبيق');
+          showNotification("تم تثبيت التطبيق بنجاح", "success");
+        }
+        deferredPrompt = null;
+      });
+    };
+    
+    var chatsActions = document.querySelector('.chats-actions');
+    if (chatsActions) {
+      chatsActions.appendChild(installBtn);
+    }
+  });
+  
   // إضافة زر تسجيل الخروج
   var chatsActions = document.querySelector('.chats-actions');
   if (chatsActions) {
@@ -964,6 +1244,30 @@ window.onload = function() {
     logoutBtn.onclick = logout;
     chatsActions.appendChild(logoutBtn);
   }
+  
+  // إضافة زر الإيموجي
+  var inputButtons = document.querySelector('.input-buttons');
+  if (inputButtons) {
+    var emojiBtn = document.createElement('button');
+    emojiBtn.className = 'input-btn';
+    emojiBtn.title = 'ايموجي';
+    emojiBtn.innerHTML = '<i class="fas fa-smile"></i>';
+    emojiBtn.onclick = showEmojiPicker;
+    inputButtons.appendChild(emojiBtn);
+  }
+  
+  // إغلاق منتقي الإيموجي عند النقر خارجها
+  document.addEventListener('click', function(event) {
+    var pickerContainer = document.getElementById("emoji-picker-container");
+    var emojiBtn = document.querySelector('.input-btn[title="ايموجي"]');
+    
+    if (pickerContainer && pickerContainer.style.display === "block" &&
+        !pickerContainer.contains(event.target) && 
+        event.target !== emojiBtn && 
+        !emojiBtn.contains(event.target)) {
+      hideEmojiPicker();
+    }
+  });
   
   // إظهار شاشة الانتظار
   showScreen("login");
