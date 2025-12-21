@@ -9,6 +9,9 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const multer = require("multer");
 const fetch = require("node-fetch");
 const sharp = require("sharp");
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const server = http.createServer(app);
@@ -1646,6 +1649,7 @@ app.post("/upload", upload.single('file'), (req, res) => {
   }
 });
 
+// دالة محسنة لـ save_voice
 app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
   try {
     const { audioData, fileName, mimeType } = req.body;
@@ -1661,23 +1665,42 @@ app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
     
     const buffer = Buffer.from(base64Data, 'base64');
     
-    // دائماً حفظ كـ .ogg بغض النظر عن التنسيق الأصلي
+    // حفظ الملف المؤقت
+    const tempFileName = `temp_${Date.now()}.webm`;
+    const tempPath = path.join(uploadsDir, tempFileName);
+    fs.writeFileSync(tempPath, buffer);
+    
     const finalFileName = fileName || `voice_${Date.now()}.ogg`;
-    const filePath = path.join(uploadsDir, finalFileName);
+    const finalPath = path.join(uploadsDir, finalFileName);
     
-    // إذا كان التنسيق webm، نحوله إلى ogg بسيط (تغيير الامتداد فقط)
-    if (mimeType && mimeType.includes('webm')) {
-      console.log("📝 تحويل webm إلى ogg (تغيير الامتداد فقط)");
-      // في بيئة الإنتاج، يمكنك استخدام مكتبة لتحويل فعلي
-      // لكن لتجنب التعقيد، نغير الامتداد فقط
-    }
-    
-    fs.writeFileSync(filePath, buffer);
-    
-    res.json({ 
-      success: true, 
-      filePath: `/uploads/${finalFileName}`
-    });
+    // تحويل إلى ogg/opus (تنسيق واتساب المفضل)
+    ffmpeg(tempPath)
+      .toFormat('ogg')
+      .audioCodec('libopus')
+      .audioBitrate('24k')
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .on('end', () => {
+        // حذف الملف المؤقت
+        fs.unlinkSync(tempPath);
+        
+        res.json({ 
+          success: true, 
+          filePath: `/uploads/${finalFileName}`
+        });
+      })
+      .on('error', (err) => {
+        console.error('❌ خطأ في تحويل الصوت:', err);
+        // في حالة فشل التحويل، استخدام الملف الأصلي
+        fs.renameSync(tempPath, finalPath);
+        
+        res.json({ 
+          success: true, 
+          filePath: `/uploads/${finalFileName}`
+        });
+      })
+      .save(finalPath);
+      
   } catch (error) {
     console.error("❌ خطأ في حفظ الصوت:", error);
     res.status(500).json({ success: false, error: error.message });
