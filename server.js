@@ -1081,171 +1081,395 @@ io.on("connection", async (socket) => {
   });
 
   // إرسال وسائط - الإصلاح النهائي
-  socket.on("send_media", async (data) => {
-    if (!isReady) {
-      socket.emit("error", "واتساب غير متصل");
+// إرسال وسائط - الإصلاح النهائي للرسائل الصوتية
+socket.on("send_media", async (data) => {
+  if (!isReady) {
+    socket.emit("error", "واتساب غير متصل");
+    return;
+  }
+
+  try {
+    const chatId = data.to.includes('@') ? data.to : `${data.to}@c.us`;
+    const mediaPath = path.join(__dirname, 'public', data.filePath.replace(/^\//, ''));
+    
+    if (!fs.existsSync(mediaPath)) {
+      socket.emit("error", "الملف غير موجود");
       return;
     }
 
+    const stats = fs.statSync(mediaPath);
+    const fileSizeInMB = stats.size / (1024 * 1024);
+    
+    if (fileSizeInMB > 100) {
+      socket.emit("error", "حجم الملف كبير جداً (100MB كحد أقصى)");
+      return;
+    }
+
+    // قراءة الملف
+    const fileBuffer = fs.readFileSync(mediaPath);
+    const fileName = path.basename(mediaPath);
+    const fileExtension = path.extname(fileName).toLowerCase();
+    
+    // تحويل ملفات 3gp إلى jpg إذا كانت صوراً
+    if (fileExtension === '.3gp' && data.mediaType === 'image') {
+      try {
+        const jpgBuffer = await sharp(fileBuffer)
+          .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+        
+        const convertedFileName = fileName.replace('.3gp', '.jpg');
+        const convertedPath = path.join(uploadsDir, convertedFileName);
+        fs.writeFileSync(convertedPath, jpgBuffer);
+        
+        data.filePath = `/uploads/${convertedFileName}`;
+        data.mediaType = 'image';
+        
+        return socket.emit("send_media", data);
+      } catch (error) {
+        console.log("⚠️ فشل تحويل 3gp إلى JPG:", error.message);
+      }
+    }
+
+    // تحديد MIME type الصحيح
+    let mimeType;
+    if (data.mediaType === 'image') {
+      mimeType = 'image/jpeg';
+    } else if (data.mediaType === 'audio') {
+      // تحديد MIME type للرسائل الصوتية
+      if (data.isVoiceMessage) {
+        mimeType = 'audio/ogg; codecs=opus';
+      } else {
+        mimeType = 'audio/mpeg';
+      }
+    } else if (data.mediaType === 'video') {
+      mimeType = 'video/mp4';
+    } else {
+      mimeType = 'application/octet-stream';
+    }
+    
+    // إنشاء كائن Media
+    const media = new MessageMedia(mimeType, fileBuffer.toString('base64'), fileName);
+    
+    // إعداد خيارات الإرسال - الإصلاح الحاسم
+    const options = {};
+    
+    // إرسال الصوت كرسالة صوتية (PTT)
+    if (data.mediaType === 'audio' && data.isVoiceMessage) {
+      // الحل: إرسال كملف صوتي عادي بدون sendAudioAsVoice
+      try {
+        // محاولة الإرسال كرسالة صوتية (PTT)
+        const message = await client.sendMessage(chatId, media, {
+          sendAudioAsVoice: false, // تم التعليق لأنه يسبب المشكلة
+          caption: data.caption || ''
+        });
+        
+        console.log("✅ تم إرسال الرسالة الصوتية بنجاح");
+        
+        // متابعة حفظ البيانات...
+        const contactInfo = await getContactInfo(chatId, currentSessionId);
+
+        // حفظ في قاعدة البيانات
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_messages 
+             (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
+              content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
+            [chatId, 
+             message.id._serialized,
+             currentSessionId,
+             'me',
+             'أنا',
+             'me',
+             data.caption || "رسالة صوتية", 
+             data.filePath, 
+             'ptt', // تغيير النوع إلى ptt للرسائل الصوتية
+             stats.size,
+             fileName,
+             true]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في حفظ الرسالة الصوتية:", dbError.message);
+        }
+
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+             ON CONFLICT (id, session_id) 
+             DO UPDATE SET 
+               name = COALESCE($2, zzapp_chats.name),
+               display_name = COALESCE($3, zzapp_chats.display_name),
+               about = COALESCE($5, zzapp_chats.about),
+               pic = COALESCE($6, zzapp_chats.pic),
+               pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+               last_message = $8,
+               last_time = NOW(),
+               updated_at = NOW(),
+               message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+            [chatId, 
+             contactInfo.name,
+             contactInfo.display_name,
+             contactInfo.number,
+             contactInfo.about,
+             contactInfo.pic,
+             contactInfo.pic_cached,
+             data.caption || "رسالة صوتية",
+             currentSessionId]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
+        }
+
+        const messageData = {
+          chat_id: chatId,
+          message_id: message.id._serialized,
+          text: data.caption || "رسالة صوتية",
+          media: data.filePath,
+          media_type: 'ptt', // تغيير النوع إلى ptt
+          media_name: fileName,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          sender_name: "أنا",
+          sender_number: "me",
+          session_id: currentSessionId
+        };
+        
+        socket.emit("message", messageData);
+        
+        const chatData = {
+          id: chatId,
+          name: contactInfo.name,
+          display_name: contactInfo.display_name,
+          number: contactInfo.number,
+          about: contactInfo.about,
+          pic: contactInfo.pic,
+          pic_cached: contactInfo.pic_cached,
+          last_message: data.caption || "رسالة صوتية",
+          last_time: new Date().toISOString(),
+          session_id: currentSessionId
+        };
+        
+        io.emit("chat_update", chatData);
+        
+        return; // الخروج بعد الإرسال الناجح
+
+      } catch (pttError) {
+        console.log("⚠️ فشل إرسال كـ PTT، محاولة كملف صوتي عادي:", pttError.message);
+        
+        // محاولة الإرسال كملف صوتي عادي
+        try {
+          const message = await client.sendMessage(chatId, media, { 
+            caption: data.caption || 'رسالة صوتية'
+          });
+          
+          console.log("✅ تم إرسال كملف صوتي عادي");
+          
+          // تحديث نوع الوسائط إلى audio
+          data.mediaType = 'audio';
+          data.isVoiceMessage = false;
+          
+          // إعادة معالجة البيانات
+          const contactInfo = await getContactInfo(chatId, currentSessionId);
+
+          // حفظ في قاعدة البيانات
+          try {
+            await pool.query(
+              `INSERT INTO zzapp_messages 
+               (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
+                content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
+              [chatId, 
+               message.id._serialized,
+               currentSessionId,
+               'me',
+               'أنا',
+               'me',
+               data.caption || "رسالة صوتية", 
+               data.filePath, 
+               'audio',
+               stats.size,
+               fileName,
+               true]
+            );
+          } catch (dbError) {
+            console.log("⚠️ خطأ في حفظ الرسالة الصوتية:", dbError.message);
+          }
+
+          const messageData = {
+            chat_id: chatId,
+            message_id: message.id._serialized,
+            text: data.caption || "رسالة صوتية",
+            media: data.filePath,
+            media_type: 'audio',
+            media_name: fileName,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+            sender_name: "أنا",
+            sender_number: "me",
+            session_id: currentSessionId
+          };
+          
+          socket.emit("message", messageData);
+          
+          const chatData = {
+            id: chatId,
+            name: contactInfo.name,
+            display_name: contactInfo.display_name,
+            number: contactInfo.number,
+            about: contactInfo.about,
+            pic: contactInfo.pic,
+            pic_cached: contactInfo.pic_cached,
+            last_message: data.caption || "رسالة صوتية",
+            last_time: new Date().toISOString(),
+            session_id: currentSessionId
+          };
+          
+          io.emit("chat_update", chatData);
+          
+          return; // الخروج بعد الإرسال الناجح
+          
+        } catch (audioError) {
+          console.log("❌ فشل الإرسال كملف صوتي عادي:", audioError.message);
+          throw audioError;
+        }
+      }
+    } else {
+      // للأنواع الأخرى (صور، فيديو، مستندات)
+      try {
+        const message = await client.sendMessage(chatId, media, { 
+          caption: data.caption || ''
+        });
+        
+        const contactInfo = await getContactInfo(chatId, currentSessionId);
+
+        // حفظ في قاعدة البيانات
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_messages 
+             (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
+              content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
+            [chatId, 
+             message.id._serialized,
+             currentSessionId,
+             'me',
+             'أنا',
+             'me',
+             data.caption || "[وسائط]", 
+             data.filePath, 
+             data.mediaType,
+             stats.size,
+             fileName,
+             true]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في حفظ الوسائط:", dbError.message);
+        }
+
+        try {
+          await pool.query(
+            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+             ON CONFLICT (id, session_id) 
+             DO UPDATE SET 
+               name = COALESCE($2, zzapp_chats.name),
+               display_name = COALESCE($3, zzapp_chats.display_name),
+               about = COALESCE($5, zzapp_chats.about),
+               pic = COALESCE($6, zzapp_chats.pic),
+               pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+               last_message = $8,
+               last_time = NOW(),
+               updated_at = NOW(),
+               message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+            [chatId, 
+             contactInfo.name,
+             contactInfo.display_name,
+             contactInfo.number,
+             contactInfo.about,
+             contactInfo.pic,
+             contactInfo.pic_cached,
+             data.caption || "[وسائط]",
+             currentSessionId]
+          );
+        } catch (dbError) {
+          console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
+        }
+
+        const messageData = {
+          chat_id: chatId,
+          message_id: message.id._serialized,
+          text: data.caption || "[وسائط]",
+          media: data.filePath,
+          media_type: data.mediaType,
+          media_name: fileName,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          sender_name: "أنا",
+          sender_number: "me",
+          session_id: currentSessionId
+        };
+        
+        socket.emit("message", messageData);
+        
+        const chatData = {
+          id: chatId,
+          name: contactInfo.name,
+          display_name: contactInfo.display_name,
+          number: contactInfo.number,
+          about: contactInfo.about,
+          pic: contactInfo.pic,
+          pic_cached: contactInfo.pic_cached,
+          last_message: data.caption || "[وسائط]",
+          last_time: new Date().toISOString(),
+          session_id: currentSessionId
+        };
+        
+        io.emit("chat_update", chatData);
+
+      } catch (otherError) {
+        console.log("❌ فشل إرسال الوسائط الأخرى:", otherError.message);
+        throw otherError;
+      }
+    }
+
+  } catch (error) {
+    console.log("❌ فشل إرسال الوسائط:", error.message);
+    
+    // محاولة أخيرة: إرسال كملف عادي بدون أي خيارات
     try {
       const chatId = data.to.includes('@') ? data.to : `${data.to}@c.us`;
       const mediaPath = path.join(__dirname, 'public', data.filePath.replace(/^\//, ''));
       
-      if (!fs.existsSync(mediaPath)) {
-        socket.emit("error", "الملف غير موجود");
-        return;
+      if (fs.existsSync(mediaPath)) {
+        const fileBuffer = fs.readFileSync(mediaPath);
+        const fileName = path.basename(mediaPath);
+        const media = MessageMedia.fromFilePath(mediaPath);
+        
+        const message = await client.sendMessage(chatId, media);
+        
+        socket.emit("message", {
+          chat_id: data.to,
+          message_id: message.id._serialized,
+          text: data.caption || "[وسائط]",
+          media: data.filePath,
+          media_type: data.mediaType,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          sender_name: "أنا",
+          sender_number: "me",
+          session_id: currentSessionId
+        });
+        
+        showNotification("تم إرسال الوسائط بنجاح (طريقة بديلة)", "success");
       }
-
-      const stats = fs.statSync(mediaPath);
-      const fileSizeInMB = stats.size / (1024 * 1024);
-      
-      if (fileSizeInMB > 100) {
-        socket.emit("error", "حجم الملف كبير جداً (100MB كحد أقصى)");
-        return;
-      }
-
-      // قراءة الملف
-      const fileBuffer = fs.readFileSync(mediaPath);
-      const fileName = path.basename(mediaPath);
-      const fileExtension = path.extname(fileName).toLowerCase();
-      
-      // تحويل ملفات 3gp إلى jpg إذا كانت صوراً
-      if (fileExtension === '.3gp' && data.mediaType === 'image') {
-        try {
-          const jpgBuffer = await sharp(fileBuffer)
-            .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: 80 })
-            .toBuffer();
-          
-          const convertedFileName = fileName.replace('.3gp', '.jpg');
-          const convertedPath = path.join(uploadsDir, convertedFileName);
-          fs.writeFileSync(convertedPath, jpgBuffer);
-          
-          // تحديث البيانات للنسخة المحولة
-          data.filePath = `/uploads/${convertedFileName}`;
-          data.mediaType = 'image';
-          
-          // إعادة استدعاء الدالة بالملف المحول
-          return socket.emit("send_media", data);
-        } catch (error) {
-          console.log("⚠️ فشل تحويل 3gp إلى JPG:", error.message);
-        }
-      }
-
-      // إنشاء كائن Media من المخزن المؤقت
-      let mimeType;
-      if (data.mediaType === 'image') {
-        mimeType = 'image/jpeg';
-      } else if (data.mediaType === 'audio') {
-        mimeType = data.isVoiceMessage ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
-      } else if (data.mediaType === 'video') {
-        mimeType = 'video/mp4';
-      } else {
-        mimeType = 'application/octet-stream';
-      }
-      
-      const media = new MessageMedia(mimeType, fileBuffer.toString('base64'), fileName);
-      
-      // إعداد خيارات الإرسال
-      const options = {
-        caption: data.caption || '',
-        sendAudioAsVoice: data.mediaType === 'audio' && data.isVoiceMessage
-      };
-
-      // إرسال الوسائط
-      const message = await client.sendMessage(chatId, media, options);
-
-      const contactInfo = await getContactInfo(chatId, currentSessionId);
-
-      // حفظ في قاعدة البيانات
-      try {
-        await pool.query(
-          `INSERT INTO zzapp_messages 
-           (chat_id, message_id, session_id, sender_id, sender_name, sender_number, 
-            content, media_url, media_type, media_size, media_name, is_from_me, timestamp)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
-          [chatId, 
-           message.id._serialized,
-           currentSessionId,
-           'me',
-           'أنا',
-           'me',
-           data.caption || "[وسائط]", 
-           data.filePath, 
-           data.mediaType,
-           stats.size,
-           fileName,
-           true]
-        );
-      } catch (dbError) {
-        console.log("⚠️ خطأ في حفظ الوسائط:", dbError.message);
-      }
-
-      try {
-        await pool.query(
-          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
-           ON CONFLICT (id, session_id) 
-           DO UPDATE SET 
-             name = COALESCE($2, zzapp_chats.name),
-             display_name = COALESCE($3, zzapp_chats.display_name),
-             about = COALESCE($5, zzapp_chats.about),
-             pic = COALESCE($6, zzapp_chats.pic),
-             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
-             last_message = $8,
-             last_time = NOW(),
-             updated_at = NOW(),
-             message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
-          [chatId, 
-           contactInfo.name,
-           contactInfo.display_name,
-           contactInfo.number,
-           contactInfo.about,
-           contactInfo.pic,
-           contactInfo.pic_cached,
-           data.caption || "[وسائط]",
-           currentSessionId]
-        );
-      } catch (dbError) {
-        console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
-      }
-
-      const messageData = {
-        chat_id: chatId,
-        message_id: message.id._serialized,
-        text: data.caption || "[وسائط]",
-        media: data.filePath,
-        media_type: data.mediaType,
-        media_name: fileName,
-        timestamp: new Date().toISOString(),
-        is_from_me: true,
-        sender_name: "أنا",
-        sender_number: "me",
-        session_id: currentSessionId
-      };
-      
-      socket.emit("message", messageData);
-      
-      const chatData = {
-        id: chatId,
-        name: contactInfo.name,
-        display_name: contactInfo.display_name,
-        number: contactInfo.number,
-        about: contactInfo.about,
-        pic: contactInfo.pic,
-        pic_cached: contactInfo.pic_cached,
-        last_message: data.caption || "[وسائط]",
-        last_time: new Date().toISOString(),
-        session_id: currentSessionId
-      };
-      
-      io.emit("chat_update", chatData);
-
-    } catch (error) {
-      console.log("❌ فشل إرسال الوسائط:", error.message);
+    } catch (finalError) {
+      console.log("❌ فشل الإرسال البديل أيضًا:", finalError.message);
       socket.emit("error", "فشل إرسال الوسائط: " + error.message);
     }
-  });
+  }
+});
 
   // بدء محادثة جديدة
   socket.on("start_new_chat", async (phoneNumber) => {
