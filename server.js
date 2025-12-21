@@ -312,93 +312,34 @@ async function compressImage(imageBuffer, quality = 50) {
   }
 }
 
-// دالة لتحويل الصوت إلى Voice Note حقيقي
-function convertToVoiceNote(inputPath) {
+// دالة لتحويل الصوت إلى Ogg/Opus
+function convertAudioToOgg(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    // أولاً التحقق من الملف
-    try {
-      if (!fs.existsSync(inputPath)) {
-        return reject(new Error("ملف الإدخال غير موجود"));
+    // استخدام إعدادات WhatsApp المثلى للرسائل الصوتية
+    const cmd = `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 32k -ac 1 -ar 48000 "${outputPath}"`;
+    
+    console.log("🔧 تحويل الصوت باستخدام الأمر:", cmd);
+    
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) {
+        console.error("❌ فشل تحويل الصوت:", stderr || err.message);
+        
+        // محاولة بديلة: استخدام إعدادات أبسط
+        const simpleCmd = `ffmpeg -y -i "${inputPath}" -c:a libopus "${outputPath}"`;
+        console.log("🔄 محاولة تحويل بسيط:", simpleCmd);
+        
+        exec(simpleCmd, (err2) => {
+          if (err2) {
+            console.error("❌ فشل التحويل البسيط أيضًا");
+            reject(err2);
+          } else {
+            resolve(outputPath);
+          }
+        });
+      } else {
+        resolve(outputPath);
       }
-
-      const stats = fs.statSync(inputPath);
-      if (stats.size === 0) {
-        return reject(new Error("ملف الإدخال فارغ"));
-      }
-
-      // قراءة أول 4 بايت للتحقق من نوع الملف
-      const buffer = Buffer.alloc(4);
-      const fd = fs.openSync(inputPath, 'r');
-      fs.readSync(fd, buffer, 0, 4, 0);
-      fs.closeSync(fd);
-      
-      const hex = buffer.toString('hex');
-      console.log("🔍 أول 4 بايت من الملف:", hex);
-      
-      // التحقق إذا كان الملف OGG صالح
-      if (hex === '4f676753') { // توقيع OGG
-        console.log("✅ الملف OGG صالح بالفعل، استخدامه كما هو");
-        resolve(inputPath);
-        return;
-      }
-      
-      const outputPath = inputPath.replace(/\.\w+$/, "_ptt.ogg");
-      
-      // إذا كان webm أو بيانات raw، نحوله إلى ogg/opus
-      const cmd = `ffmpeg -y -i "${inputPath}" -map_metadata -1 -vn -c:a libopus -b:a 32k -ac 1 -ar 48000 "${outputPath}"`;
-      
-      console.log("🔧 تشغيل الأمر:", cmd);
-      
-      exec(cmd, (err, stdout, stderr) => {
-        if (err) {
-          console.error("❌ خطأ ffmpeg:", stderr);
-          // إذا فشل التحويل، جرب طريقة أبسط
-          const simpleCmd = `ffmpeg -y -i "${inputPath}" -c:a libopus "${outputPath}"`;
-          console.log("🔄 محاولة طريقة أبسط:", simpleCmd);
-          
-          exec(simpleCmd, (err2) => {
-            if (err2) {
-              console.error("❌ فشل التحويل البسيط أيضًا");
-              // إذا فشل كل شيء، أعد الملف الأصلي
-              resolve(inputPath);
-            } else {
-              resolve(outputPath);
-            }
-          });
-        } else {
-          resolve(outputPath);
-        }
-      });
-    } catch (error) {
-      console.error("❌ خطأ في تحويل الصوت:", error.message);
-      reject(error);
-    }
-  });
-}
-
-// دالة لإصلاح ملف OGG التالف
-function fixOggFile(inputPath) {
-  return new Promise((resolve, reject) => {
-    try {
-      const fixedPath = inputPath.replace(/\.ogg$/, '_fixed.ogg');
-      
-      // إصلاح الملف باستخدام ffmpeg
-      const cmd = `ffmpeg -y -i "${inputPath}" -c:a copy -f ogg "${fixedPath}"`;
-      
-      exec(cmd, (err) => {
-        if (err) {
-          console.error("❌ فشل إصلاح ملف OGG");
-          reject(err);
-        } else {
-          // حذف الملف الأصلي واستبداله بالمصلح
-          fs.unlinkSync(inputPath);
-          fs.renameSync(fixedPath, inputPath);
-          resolve(inputPath);
-        }
-      });
-    } catch (error) {
-      reject(error);
-    }
+    });
   });
 }
 
@@ -1190,11 +1131,9 @@ io.on("connection", async (socket) => {
       return;
     }
 
-    // تعريف المتغيرات
     let chatId;
     let mediaPath;
     let fileName;
-    let fileBuffer;
     let finalMediaPath = '';
     let shouldRemoveConverted = false;
 
@@ -1215,40 +1154,26 @@ io.on("connection", async (socket) => {
         return;
       }
 
-      // قراءة الملف
-      fileBuffer = fs.readFileSync(mediaPath);
       fileName = path.basename(mediaPath);
       const fileExtension = path.extname(fileName).toLowerCase();
       
-      // التحقق من الملف الصوتي
-      if (fileExtension === '.ogg' && data.mediaType === 'audio' && data.isVoiceMessage) {
-        // قراءة أول 4 بايت للتحقق
-        const header = fileBuffer.slice(0, 4).toString('hex');
-        console.log("🔍 توقيع ملف الصوت:", header);
-        
-        if (header === '4f676753') { // OggS توقيع
-          console.log("✅ الملف OGG صالح بالفعل");
-          finalMediaPath = mediaPath;
-        } else {
-          // الملف تالف، حاول إصلاحه
-          console.log("⚠️ الملف OGG تالف، جاري الإصلاح...");
-          try {
-            const fixedPath = await fixOggFile(mediaPath);
-            finalMediaPath = fixedPath;
-            shouldRemoveConverted = true;
-          } catch (fixError) {
-            console.log("❌ فشل إصلاح الملف:", fixError.message);
-            finalMediaPath = mediaPath;
-          }
-        }
-      } else if (data.mediaType === 'audio' && data.isVoiceMessage) {
-        // تحويل أي صيغة صوتية إلى Ogg/Opus
-        console.log("🎤 جاري تحويل الصوت إلى Voice Note...");
+      // معالجة الملفات الصوتية
+      if (data.mediaType === 'audio' && data.isVoiceMessage) {
         try {
-          finalMediaPath = await convertToVoiceNote(mediaPath);
+          // تحويل الصوت إلى Ogg/Opus
+          console.log("🎤 جاري تحويل الصوت إلى Ogg/Opus...");
+          const outputFileName = fileName.replace(/\.[^/.]+$/, "") + "_converted.ogg";
+          const outputPath = path.join(uploadsDir, outputFileName);
+          
+          await convertAudioToOgg(mediaPath, outputPath);
+          
+          finalMediaPath = outputPath;
+          fileName = outputFileName;
+          data.filePath = `/uploads/${outputFileName}`;
           shouldRemoveConverted = true;
+          console.log("✅ تم تحويل الصوت بنجاح");
         } catch (convertError) {
-          console.log("❌ فشل تحويل الصوت:", convertError.message);
+          console.log("❌ فشل تحويل الصوت، استخدام الملف الأصلي:", convertError.message);
           finalMediaPath = mediaPath;
         }
       } else {
@@ -1258,6 +1183,7 @@ io.on("connection", async (socket) => {
       // تحويل ملفات 3gp إلى jpg إذا كانت صوراً
       if (fileExtension === '.3gp' && data.mediaType === 'image') {
         try {
+          const fileBuffer = fs.readFileSync(finalMediaPath);
           const jpgBuffer = await sharp(fileBuffer)
             .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
             .jpeg({ quality: 80 })
@@ -1271,7 +1197,6 @@ io.on("connection", async (socket) => {
           data.mediaType = 'image';
           finalMediaPath = convertedPath;
           fileName = convertedFileName;
-          fileBuffer = jpgBuffer;
         } catch (error) {
           console.log("⚠️ فشل تحويل 3gp إلى JPG:", error.message);
         }
@@ -1304,11 +1229,13 @@ io.on("connection", async (socket) => {
       // إعداد خيارات الإرسال
       const options = {
         caption: data.caption || '',
-        sendAudioAsVoice: data.mediaType === 'audio' && data.isVoiceMessage
+        sendAudioAsVoice: false // تعطيل هذا الخيار نهائياً
       };
 
       // إرسال الوسائط
+      console.log("📤 جاري إرسال الوسائط إلى WhatsApp...");
       const message = await client.sendMessage(chatId, media, options);
+      console.log("✅ تم إرسال الوسائط بنجاح");
 
       const contactInfo = await getContactInfo(chatId, currentSessionId);
 
@@ -1397,7 +1324,7 @@ io.on("connection", async (socket) => {
       io.emit("chat_update", chatData);
 
       // تنظيف الملفات المؤقتة
-      if (shouldRemoveConverted && finalMediaPath !== mediaPath) {
+      if (shouldRemoveConverted && finalMediaPath !== mediaPath && fs.existsSync(finalMediaPath)) {
         try {
           fs.unlinkSync(finalMediaPath);
           console.log("🗑️ تم حذف الملف المؤقت");
@@ -1415,6 +1342,7 @@ io.on("connection", async (socket) => {
           throw new Error("chatId غير معرف");
         }
         
+        console.log("🔄 محاولة إرسال بديلة...");
         const media = MessageMedia.fromFilePath(finalMediaPath || mediaPath);
         const message = await client.sendMessage(chatId, media, { 
           caption: data.caption || ''
@@ -1433,12 +1361,13 @@ io.on("connection", async (socket) => {
           session_id: currentSessionId
         });
         
+        console.log("✅ نجحت المحاولة البديلة");
       } catch (retryError) {
         console.log("❌ فشل الإرسال البديل أيضًا:", retryError.message);
         socket.emit("error", "فشل إرسال الوسائط: " + error.message);
       } finally {
         // تنظيف الملفات المؤقتة في حالة الفشل
-        if (shouldRemoveConverted && finalMediaPath !== mediaPath) {
+        if (shouldRemoveConverted && finalMediaPath !== mediaPath && fs.existsSync(finalMediaPath)) {
           try {
             fs.unlinkSync(finalMediaPath);
           } catch (unlinkError) {
@@ -1606,26 +1535,59 @@ app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
       return res.status(400).json({ success: false, error: "بيانات صوتية فارغة" });
     }
     
-    // التحقق من توقيع OGG الصحيح (OggS)
-    const header = buffer.slice(0, 4).toString('hex');
-    console.log("🔍 توقيع الصوت المحفوظ:", header);
+    // حفظ كملف مؤقت
+    const tempPath = path.join(uploadsDir, `temp_${Date.now()}`);
+    fs.writeFileSync(tempPath, buffer);
     
-    const filePath = path.join(uploadsDir, fileName || `voice_${Date.now()}.ogg`);
+    // تحويل إلى ogg/opus
+    const outputFileName = `voice_${Date.now()}.ogg`;
+    const outputPath = path.join(uploadsDir, outputFileName);
     
-    fs.writeFileSync(filePath, buffer);
+    console.log("🔧 جاري تحويل الصوت إلى Ogg/Opus...");
     
-    // التحقق من أن الملف تم حفظه
-    const stats = fs.statSync(filePath);
-    if (stats.size === 0) {
-      return res.status(500).json({ success: false, error: "فشل حفظ الملف الصوتي" });
-    }
+    const cmd = `ffmpeg -y -i "${tempPath}" -c:a libopus -b:a 32k -ac 1 -ar 48000 "${outputPath}"`;
     
-    res.json({ 
-      success: true, 
-      filePath: `/uploads/${path.basename(filePath)}`
+    exec(cmd, (err, stdout, stderr) => {
+      // حذف الملف المؤقت
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (e) {}
+      
+      if (err) {
+        console.error('❌ فشل تحويل الصوت:', stderr || err.message);
+        
+        // محاولة بديلة
+        console.log("🔄 محاولة تحويل بسيط...");
+        const simpleCmd = `ffmpeg -y -i "${tempPath}" -c:a libopus "${outputPath}"`;
+        
+        exec(simpleCmd, (err2) => {
+          if (err2) {
+            console.error('❌ فشل التحويل البسيط أيضًا');
+            
+            // محاولة أخيرة: حفظ كملف raw
+            const rawPath = path.join(uploadsDir, outputFileName);
+            fs.writeFileSync(rawPath, buffer);
+            
+            res.json({ 
+              success: true, 
+              filePath: `/uploads/${outputFileName}`
+            });
+          } else {
+            res.json({ 
+              success: true, 
+              filePath: `/uploads/${outputFileName}`
+            });
+          }
+        });
+      } else {
+        res.json({ 
+          success: true, 
+          filePath: `/uploads/${outputFileName}`
+        });
+      }
     });
   } catch (error) {
-    console.error("❌ خطأ في حفظ الصوت:", error);
+    console.error('❌ خطأ في حفظ الصوت:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
