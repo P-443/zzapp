@@ -8,6 +8,7 @@ const fs = require("fs");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const multer = require("multer");
 const fetch = require("node-fetch");
+const sharp = require("sharp");
 
 const app = express();
 const server = http.createServer(app);
@@ -22,14 +23,15 @@ const downloadsDir = path.join(__dirname, 'public', 'downloads');
 const uploadsDir = path.join(__dirname, 'public', 'uploads');
 const sessionsDir = path.join(__dirname, '.wwebjs_auth');
 const cacheDir = path.join(__dirname, 'public', 'cache');
+const avatarsDir = path.join(__dirname, 'public', 'avatars');
 
-[downloadsDir, uploadsDir, sessionsDir, cacheDir].forEach(dir => {
+[downloadsDir, uploadsDir, sessionsDir, cacheDir, avatarsDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 });
 
-// إعداد multer للرفع
+// إعداد multer للرفع - قبول جميع أنواع الملفات
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
@@ -45,27 +47,8 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedMimes = [
-      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
-      'video/mp4', 'video/avi', 'video/mkv', 'video/mov', 'video/wmv', 'video/flv', 'video/3gp', 'video/webm',
-      'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/aac', 'audio/m4a', 'audio/x-m4a',
-      'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      'text/plain', 'application/zip', 'application/x-rar-compressed'
-    ];
-    
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      const ext = path.extname(file.originalname).toLowerCase();
-      const allowedExts = ['.3gp', '.gp3', '.pg3', '.heic', '.heif'];
-      if (allowedExts.includes(ext)) {
-        cb(null, true);
-      } else {
-        cb(new Error('نوع الملف غير مدعوم'), false);
-      }
-    }
+    // قبول جميع أنواع الملفات
+    cb(null, true);
   }
 });
 
@@ -281,6 +264,21 @@ function cleanDisplayName(name, contactId) {
   return cleanName || extractNumberFromId(contactId);
 }
 
+// دالة لتحويل الصور إلى صيغة 3gp مخففة الجودة
+async function convertTo3GP(imageBuffer) {
+  try {
+    // تحويل الصورة إلى JPEG بجودة 30% ثم إعادة تسميتها كـ 3gp
+    const convertedBuffer = await sharp(imageBuffer)
+      .jpeg({ quality: 30 })
+      .toBuffer();
+    
+    return convertedBuffer;
+  } catch (error) {
+    console.log("⚠️ خطأ في تحويل الصورة، استخدام النسخة الأصلية:", error.message);
+    return imageBuffer;
+  }
+}
+
 // دالة للحصول على معلومات جهة الاتصال
 async function getContactInfo(contactId) {
   try {
@@ -311,20 +309,25 @@ async function getContactInfo(contactId) {
     try {
       const profilePicUrl = await client.getProfilePicUrl(contactId);
       if (profilePicUrl) {
-        const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.jpg`;
+        const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.3gp`;
         const cachePath = path.join(cacheDir, cacheFileName);
+        const avatarPath = path.join(avatarsDir, cacheFileName);
         
+        // التحقق من وجود صورة مخبأة
         if (fs.existsSync(cachePath)) {
           const stats = fs.statSync(cachePath);
           const now = new Date();
           const cacheAge = now - stats.mtime;
           
-          if (cacheAge > 3600000) {
-            await downloadAndCacheImage(profilePicUrl, cachePath);
+          // تحديث الصورة إذا كانت عمرها أكثر من 24 ساعة
+          if (cacheAge > 86400000) {
+            await downloadAndCacheImage(profilePicUrl, cachePath, avatarPath);
           }
           pic = `/cache/${cacheFileName}`;
+        } else if (fs.existsSync(avatarPath)) {
+          pic = `/avatars/${cacheFileName}`;
         } else {
-          await downloadAndCacheImage(profilePicUrl, cachePath);
+          await downloadAndCacheImage(profilePicUrl, cachePath, avatarPath);
           pic = `/cache/${cacheFileName}`;
         }
       }
@@ -358,13 +361,24 @@ async function getContactInfo(contactId) {
 }
 
 // دالة لتنزيل وتخزين الصور
-async function downloadAndCacheImage(url, filePath) {
+async function downloadAndCacheImage(url, cachePath, avatarPath = null) {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error('فشل تحميل الصورة');
     
     const buffer = await response.buffer();
-    fs.writeFileSync(filePath, buffer);
+    
+    // تحويل الصورة إلى 3gp مخففة الجودة
+    const convertedBuffer = await convertTo3GP(buffer);
+    
+    // حفظ في مجلد الكاش
+    fs.writeFileSync(cachePath, convertedBuffer);
+    
+    // حفظ نسخة في مجلد الأفاتار
+    if (avatarPath) {
+      fs.writeFileSync(avatarPath, convertedBuffer);
+    }
+    
     return true;
   } catch (error) {
     console.log("⚠️ خطأ في تخزين الصورة:", error.message);
@@ -395,13 +409,16 @@ async function getUserInfo() {
     try {
       const profilePicUrl = await client.getProfilePicUrl(info.wid._serialized);
       if (profilePicUrl) {
-        const cacheFileName = `user_${info.wid.user}.jpg`;
+        const cacheFileName = `user_${info.wid.user}.3gp`;
         const cachePath = path.join(cacheDir, cacheFileName);
+        const avatarPath = path.join(avatarsDir, cacheFileName);
         
         if (fs.existsSync(cachePath)) {
           pic = `/cache/${cacheFileName}`;
+        } else if (fs.existsSync(avatarPath)) {
+          pic = `/avatars/${cacheFileName}`;
         } else {
-          await downloadAndCacheImage(profilePicUrl, cachePath);
+          await downloadAndCacheImage(profilePicUrl, cachePath, avatarPath);
           pic = `/cache/${cacheFileName}`;
         }
       }
@@ -454,6 +471,13 @@ async function restoreSession() {
       if (hoursDiff < 24) {
         currentSessionId = session.session_id;
         console.log("✅ جلسة حديثة، سيتم استعادتها");
+        
+        // تحديث وقت الجلسة
+        await pool.query(
+          `UPDATE zzapp_sessions SET last_active = NOW() WHERE session_id = $1`,
+          [currentSessionId]
+        );
+        
         return session.session_id;
       } else {
         console.log("⚠️ الجلسة قديمة (أكثر من 24 ساعة)، سيتم إنشاء جلسة جديدة");
@@ -692,59 +716,38 @@ async function initWhatsApp(sessionId = null) {
           console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
         }
 
-        // تحديث المحادثة (استعلام معدّل للتعامل مع الأعمدة الجديدة)
+        // تحديث المحادثة
         try {
-          // أولاً، التحقق مما إذا كانت المحادثة موجودة
-          const existingChat = await pool.query(
-            "SELECT id FROM zzapp_chats WHERE id = $1 AND session_id = $2",
-            [chatId, currentSessionId]
+          await pool.query(
+            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
+              updated_at, is_group, session_id, message_count, unread_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
+                    CASE WHEN $11 = true THEN 0 ELSE 1 END)
+             ON CONFLICT (id) 
+             DO UPDATE SET 
+               name = COALESCE($2, zzapp_chats.name),
+               display_name = COALESCE($3, zzapp_chats.display_name),
+               about = COALESCE($5, zzapp_chats.about),
+               pic = COALESCE($6, zzapp_chats.pic),
+               pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+               last_message = $8,
+               last_time = NOW(),
+               updated_at = NOW(),
+               message_count = zzapp_chats.message_count + 1,
+               unread_count = CASE WHEN $11 = true THEN zzapp_chats.unread_count 
+                                 ELSE zzapp_chats.unread_count + 1 END`,
+            [chatId, 
+             contactInfo.name,
+             contactInfo.display_name,
+             contactInfo.number,
+             contactInfo.about,
+             contactInfo.pic,
+             contactInfo.pic_cached,
+             msg.body || "[وسائط]",
+             isGroup,
+             currentSessionId,
+             msg.fromMe]
           );
-          
-          if (existingChat.rows.length > 0) {
-            // تحديث المحادثة الموجودة
-            await pool.query(
-              `UPDATE zzapp_chats SET 
-                name = COALESCE($1, name),
-                display_name = COALESCE($2, display_name),
-                about = COALESCE($3, about),
-                pic = COALESCE($4, pic),
-                pic_cached = COALESCE($5, pic_cached),
-                last_message = $6,
-                last_time = NOW(),
-                updated_at = NOW(),
-                message_count = message_count + 1,
-                unread_count = CASE WHEN $8 = true THEN unread_count ELSE unread_count + 1 END
-               WHERE id = $7 AND session_id = $9`,
-              [contactInfo.name,
-               contactInfo.display_name,
-               contactInfo.about,
-               contactInfo.pic,
-               contactInfo.pic_cached,
-               msg.body || "[وسائط]",
-               chatId,
-               msg.fromMe,
-               currentSessionId]
-            );
-          } else {
-            // إضافة محادثة جديدة
-            await pool.query(
-              `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
-                updated_at, is_group, session_id, message_count, unread_count)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
-                      CASE WHEN $11 = true THEN 0 ELSE 1 END)`,
-              [chatId, 
-               contactInfo.name,
-               contactInfo.display_name,
-               contactInfo.number,
-               contactInfo.about,
-               contactInfo.pic,
-               contactInfo.pic_cached,
-               msg.body || "[وسائط]",
-               isGroup,
-               currentSessionId,
-               msg.fromMe]
-            );
-          }
         } catch (dbError) {
           console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
         }
@@ -969,51 +972,30 @@ io.on("connection", async (socket) => {
 
       // تحديث المحادثة
       try {
-        // أولاً، التحقق مما إذا كانت المحادثة موجودة
-        const existingChat = await pool.query(
-          "SELECT id FROM zzapp_chats WHERE id = $1 AND session_id = $2",
-          [chatId, currentSessionId]
+        await pool.query(
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+           ON CONFLICT (id) 
+           DO UPDATE SET 
+             name = COALESCE($2, zzapp_chats.name),
+             display_name = COALESCE($3, zzapp_chats.display_name),
+             about = COALESCE($5, zzapp_chats.about),
+             pic = COALESCE($6, zzapp_chats.pic),
+             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+             last_message = $8,
+             last_time = NOW(),
+             updated_at = NOW(),
+             message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+          [chatId, 
+           contactInfo.name,
+           contactInfo.display_name,
+           contactInfo.number,
+           contactInfo.about,
+           contactInfo.pic,
+           contactInfo.pic_cached,
+           data.text,
+           currentSessionId]
         );
-        
-        if (existingChat.rows.length > 0) {
-          // تحديث المحادثة الموجودة
-          await pool.query(
-            `UPDATE zzapp_chats SET 
-              name = COALESCE($1, name),
-              display_name = COALESCE($2, display_name),
-              about = COALESCE($3, about),
-              pic = COALESCE($4, pic),
-              pic_cached = COALESCE($5, pic_cached),
-              last_message = $6,
-              last_time = NOW(),
-              updated_at = NOW(),
-              message_count = message_count + 1
-             WHERE id = $7 AND session_id = $8`,
-            [contactInfo.name,
-             contactInfo.display_name,
-             contactInfo.about,
-             contactInfo.pic,
-             contactInfo.pic_cached,
-             data.text,
-             chatId,
-             currentSessionId]
-          );
-        } else {
-          // إضافة محادثة جديدة
-          await pool.query(
-            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)`,
-            [chatId, 
-             contactInfo.name,
-             contactInfo.display_name,
-             contactInfo.number,
-             contactInfo.about,
-             contactInfo.pic,
-             contactInfo.pic_cached,
-             data.text,
-             currentSessionId]
-          );
-        }
       } catch (dbError) {
         console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
       }
@@ -1077,7 +1059,17 @@ io.on("connection", async (socket) => {
       }
 
       const media = MessageMedia.fromFilePath(mediaPath);
-      const message = await client.sendMessage(chatId, media, { caption: data.caption || '' });
+      
+      // إرسال كرسالة صوتية إذا كان تسجيلاً صوتياً
+      if (data.mediaType === 'audio' && data.isVoiceMessage) {
+        media.mimetype = 'audio/ogg; codecs=opus';
+        media.filename = 'voice.ogg';
+      }
+
+      const message = await client.sendMessage(chatId, media, { 
+        caption: data.caption || '',
+        sendAudioAsVoice: data.mediaType === 'audio' && data.isVoiceMessage
+      });
 
       const contactInfo = await getContactInfo(chatId);
 
@@ -1106,51 +1098,30 @@ io.on("connection", async (socket) => {
       }
 
       try {
-        // أولاً، التحقق مما إذا كانت المحادثة موجودة
-        const existingChat = await pool.query(
-          "SELECT id FROM zzapp_chats WHERE id = $1 AND session_id = $2",
-          [chatId, currentSessionId]
+        await pool.query(
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+           ON CONFLICT (id) 
+           DO UPDATE SET 
+             name = COALESCE($2, zzapp_chats.name),
+             display_name = COALESCE($3, zzapp_chats.display_name),
+             about = COALESCE($5, zzapp_chats.about),
+             pic = COALESCE($6, zzapp_chats.pic),
+             pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+             last_message = $8,
+             last_time = NOW(),
+             updated_at = NOW(),
+             message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+          [chatId, 
+           contactInfo.name,
+           contactInfo.display_name,
+           contactInfo.number,
+           contactInfo.about,
+           contactInfo.pic,
+           contactInfo.pic_cached,
+           data.caption || "[وسائط]",
+           currentSessionId]
         );
-        
-        if (existingChat.rows.length > 0) {
-          // تحديث المحادثة الموجودة
-          await pool.query(
-            `UPDATE zzapp_chats SET 
-              name = COALESCE($1, name),
-              display_name = COALESCE($2, display_name),
-              about = COALESCE($3, about),
-              pic = COALESCE($4, pic),
-              pic_cached = COALESCE($5, pic_cached),
-              last_message = $6,
-              last_time = NOW(),
-              updated_at = NOW(),
-              message_count = message_count + 1
-             WHERE id = $7 AND session_id = $8`,
-            [contactInfo.name,
-             contactInfo.display_name,
-             contactInfo.about,
-             contactInfo.pic,
-             contactInfo.pic_cached,
-             data.caption || "[وسائط]",
-             chatId,
-             currentSessionId]
-          );
-        } else {
-          // إضافة محادثة جديدة
-          await pool.query(
-            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)`,
-            [chatId, 
-             contactInfo.name,
-             contactInfo.display_name,
-             contactInfo.number,
-             contactInfo.about,
-             contactInfo.pic,
-             contactInfo.pic_cached,
-             data.caption || "[وسائط]",
-             currentSessionId]
-          );
-        }
       } catch (dbError) {
         console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
       }
@@ -1327,7 +1298,7 @@ app.post("/upload", upload.single('file'), (req, res) => {
   }
 });
 
-app.post("/save_voice", express.json({ limit: '50mb' }), (req, res) => {
+app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
   try {
     const { audioData, fileName } = req.body;
     
@@ -1341,6 +1312,8 @@ app.post("/save_voice", express.json({ limit: '50mb' }), (req, res) => {
     }
     
     const buffer = Buffer.from(base64Data, 'base64');
+    
+    // حفظ الرسالة الصوتية كملف ogg
     const filePath = path.join(uploadsDir, fileName || `voice_${Date.now()}.ogg`);
     
     fs.writeFileSync(filePath, buffer);
@@ -1447,7 +1420,7 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache-v5').then(cache => {
+    caches.open('zzapp-cache-v6').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
@@ -1455,7 +1428,8 @@ self.addEventListener('install', event => {
         '/app.js',
         '/icon-192x192.png',
         '/icon-512x512.png',
-        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
+        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css',
+        'https://web.whatsapp.com/favicon.ico'
       ]);
     })
   );
@@ -1466,7 +1440,7 @@ self.addEventListener('activate', event => {
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheName !== 'zzapp-cache-v5') {
+          if (cacheName !== 'zzapp-cache-v6') {
             return caches.delete(cacheName);
           }
         })
@@ -1478,7 +1452,8 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   if (event.request.url.includes('/downloads/') || 
       event.request.url.includes('/uploads/') ||
-      event.request.url.includes('/cache/')) {
+      event.request.url.includes('/cache/') ||
+      event.request.url.includes('/avatars/')) {
     event.respondWith(
       caches.match(event.request).then(response => {
         return response || fetch(event.request);
@@ -1497,7 +1472,7 @@ self.addEventListener('fetch', event => {
           return response;
         }
         const responseToCache = response.clone();
-        caches.open('zzapp-cache-v5').then(cache => {
+        caches.open('zzapp-cache-v6').then(cache => {
           cache.put(event.request, responseToCache);
         });
         return response;
@@ -1522,6 +1497,12 @@ app.post("/clear-cache", (req, res) => {
     files.forEach(file => {
       fs.unlinkSync(path.join(cacheDir, file));
     });
+    
+    const avatarFiles = fs.readdirSync(avatarsDir);
+    avatarFiles.forEach(file => {
+      fs.unlinkSync(path.join(avatarsDir, file));
+    });
+    
     res.json({ success: true, message: "تم مسح الكاش" });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1567,6 +1548,7 @@ server.listen(PORT, () => {
   console.log("📱 واجهة متوافقة مع الهواتف القديمة والزرارية");
   console.log("🌐 افتح المتصفح على: http://localhost:" + PORT);
   console.log("📱 التطبيق متاح للتثبيت كمتصفح PWA");
+  console.log("🟢 جاهز للعمل مع WhatsApp");
   
   // بدء واتساب بعد تأخير قصير
   setTimeout(() => {
