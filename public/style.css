@@ -1265,3 +1265,165 @@ button:active, .chat-item:active, input:active, textarea:active, .emoji-item:act
         font-size: 18px;
     }
 }
+
+
+/* إضافة هذه الأنماط لملف style.css الحالي */
+
+/* تحسين ظهور الصور */
+.media-preview {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 0.3s;
+}
+
+.media-preview:hover {
+  transform: scale(1.02);
+}
+
+/* عارض الصور */
+.image-viewer-modal {
+  animation: fadeIn 0.3s ease;
+}
+
+.image-viewer-content {
+  position: relative;
+  animation: zoomIn 0.3s ease;
+}
+
+.close-image-btn {
+  position: absolute;
+  top: -40px;
+  right: 0;
+  background: #333;
+  color: white;
+  border: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 24px;
+  cursor: pointer;
+  z-index: 10001;
+}
+
+.download-image-btn {
+  position: absolute;
+  bottom: -40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #25D366;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 25px;
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@keyframes zoomIn {
+  from { transform: scale(0.8); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* تحسين الأفاتار */
+.avatar-img {
+  transition: opacity 0.3s;
+}
+
+.avatar-loading {
+  font-size: 14px;
+}
+
+/* تحسين وضع standalone للتطبيق */
+body.standalone {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* تحسين العرض للأرقام */
+.chat-number {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: normal;
+}
+
+/* تحسين شريط الإدخال في وضع standalone */
+@media (display-mode: standalone) {
+  .message-input-area {
+    padding-bottom: calc(15px + env(safe-area-inset-bottom));
+  }
+  
+  .chats-header, .chat-header {
+    padding-top: calc(15px + env(safe-area-inset-top));
+    min-height: calc(70px + env(safe-area-inset-top));
+  }
+}
+
+/* تحسين الأداء على الهواتف القديمة */
+@media (max-width: 480px) {
+  .image-viewer-content img {
+    max-width: 95vw;
+    max-height: 80vh;
+  }
+  
+  .download-image-btn {
+    bottom: -50px;
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+}
+
+/* تحميل الصور */
+.lazy-load {
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.lazy-load.loaded {
+  opacity: 1;
+}
+
+/* تحسين أزرار الإجراءات */
+.cache-btn, .logout-btn, .install-app-btn {
+  animation: fadeInDown 0.5s ease;
+}
+
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* تحسين الرسائل الواردة والصادرة */
+.message {
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* تحسين البحث */
+.chats-search-box {
+  transition: all 0.3s;
+}
+
+.chats-search-box:focus-within {
+  background: #054d44;
+}
