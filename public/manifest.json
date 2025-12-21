@@ -1,0 +1,70 @@
+{
+  "name": "ZZApp واتساب",
+  "short_name": "ZZApp",
+  "description": "تطبيق واتساب ويب للهواتف القديمة والزرارية",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#075e54",
+  "theme_color": "#075e54",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-96x96.png",
+      "sizes": "96x96",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-144x144.png",
+      "sizes": "144x144",
+      "type": "image/png"
+    }
+  ],
+  "categories": ["social", "communication", "utilities"],
+  "shortcuts": [
+    {
+      "name": "محادثة جديدة",
+      "short_name": "جديد",
+      "description": "بدء محادثة جديدة",
+      "url": "/?newchat=true",
+      "icons": [{ "src": "/icon-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "قائمة المحادثات",
+      "short_name": "محادثات",
+      "description": "عرض جميع المحادثات",
+      "url": "/?screen=chats",
+      "icons": [{ "src": "/icon-96x96.png", "sizes": "96x96" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot1.png",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow"
+    },
+    {
+      "src": "/screenshot2.png",
+      "sizes": "1920x1080",
+      "type": "image/png",
+      "form_factor": "wide"
+    }
+  ],
+  "prefer_related_applications": false,
+  "related_applications": [],
+  "scope": "/",
+  "dir": "rtl",
+  "lang": "ar"
+}
