@@ -194,7 +194,6 @@ async function setupDatabase() {
     console.log("✅ تم إعداد قاعدة البيانات بنجاح");
   } catch (error) {
     console.error("❌ خطأ في إعداد قاعدة البيانات:", error.message);
-    // استمر في العمل حتى لو فشل إنشاء الجداول
   }
 }
 
@@ -237,28 +236,24 @@ function extractNumberFromId(contactId) {
   return number || "غير معروف";
 }
 
-// دالة للحصول على معلومات جهة الاتصال
+// دالة مبسطة للحصول على معلومات جهة الاتصال
 async function getContactInfo(contactId) {
   try {
     if (!client) return null;
     
-    const contact = await client.getContactById(contactId);
-    if (!contact) return null;
-    
-    let name = contact.pushname || contact.name || extractNumberFromId(contactId);
+    let name = extractNumberFromId(contactId);
     let about = "";
     let pic = null;
     
+    // محاولة الحصول على معلومات جهة الاتصال باستخدام طريقة آمنة
     try {
-      about = contact.about || "";
+      // الحصول على معلومات من الرسائل الواردة
+      const chat = await client.getChatById(contactId);
+      if (chat) {
+        name = chat.name || chat.pushname || name;
+      }
     } catch (e) {
-      console.log("⚠️ لا يمكن الحصول على البايو:", e.message);
-    }
-    
-    try {
-      pic = await contact.getProfilePicUrl();
-    } catch (e) {
-      console.log("⚠️ لا يمكن الحصول على الصورة:", e.message);
+      console.log("⚠️ لا يمكن الحصول على معلومات المحادثة:", e.message);
     }
     
     return {
@@ -276,6 +271,52 @@ async function getContactInfo(contactId) {
       pic: null,
       number: extractNumberFromId(contactId),
       id: contactId
+    };
+  }
+}
+
+// دالة للحصول على معلومات المستخدم
+async function getUserInfo() {
+  try {
+    if (!client) return null;
+    
+    // طريقة بديلة للحصول على معلومات المستخدم
+    const info = client.info;
+    if (!info) {
+      // محاولة أخرى
+      try {
+        // الحصول على معلومات من pushname
+        const pushname = client.pupPage ? await client.pupPage.evaluate(() => {
+          return window.Store.Conn.serialize()?.pushname || "المستخدم";
+        }) : "المستخدم";
+        
+        return {
+          id: info?.wid?._serialized || 'unknown',
+          name: pushname,
+          number: info?.wid?.user || 'unknown',
+          about: "",
+          pic: null
+        };
+      } catch (e) {
+        console.log("⚠️ خطأ في الحصول على pushname:", e.message);
+      }
+    }
+    
+    return {
+      id: info?.wid?._serialized || 'unknown',
+      name: info?.pushname || info?.me?.name || "المستخدم",
+      number: info?.wid?.user || 'unknown',
+      about: "",
+      pic: null
+    };
+  } catch (e) {
+    console.log("⚠️ خطأ في الحصول على معلومات المستخدم:", e.message);
+    return {
+      id: "unknown",
+      name: "المستخدم",
+      number: "unknown",
+      about: "",
+      pic: null
     };
   }
 }
@@ -370,29 +411,7 @@ async function initWhatsApp(sessionId = null) {
     
     // الحصول على معلومات المستخدم
     try {
-      const me = await client.getMe();
-      userInfo = {
-        id: me._serialized,
-        name: me.pushname || me.name || "المستخدم",
-        number: me.id.user,
-        about: "",
-        pic: null
-      };
-      
-      try {
-        const myContact = await client.getContactById(me._serialized);
-        if (myContact) {
-          userInfo.about = myContact.about || "";
-          try {
-            userInfo.pic = await myContact.getProfilePicUrl();
-          } catch (e) {
-            console.log("⚠️ لا توجد صورة للمستخدم");
-          }
-        }
-      } catch (e) {
-        console.log("⚠️ لا يمكن الحصول على معلومات الاتصال:", e.message);
-      }
-      
+      userInfo = await getUserInfo();
       console.log("👤 معلومات المستخدم:", userInfo.name);
       
       // حفظ معلومات المستخدم في الجلسة
@@ -577,6 +596,7 @@ async function initWhatsApp(sessionId = null) {
 
     } catch (e) {
       console.log("❌ خطأ في معالجة الرسالة:", e.message);
+      // تجاهل خطأ ProtocolError المعروف
       if (!e.message.includes('Protocol error')) {
         console.error("تفاصيل الخطأ:", e);
       }
@@ -932,6 +952,14 @@ io.on("connection", async (socket) => {
       }
       
       const chatId = `${cleanNumber}@c.us`;
+      
+      // إرسال رسالة تجريبية للحصول على معلومات الاتصال
+      try {
+        await client.sendMessage(chatId, "مرحباً 👋");
+      } catch (e) {
+        console.log("⚠️ لا يمكن إرسال رسالة إلى هذا الرقم:", e.message);
+      }
+      
       const contactInfo = await getContactInfo(chatId);
       
       let chatData;
