@@ -11,6 +11,7 @@ var currentUser = null;
 var currentSessionId = null;
 var emojiHistory = JSON.parse(localStorage.getItem('emojiHistory')) || [];
 var chatsCache = {};
+var userAvatarCache = {};
 
 // أحداث السوكيت
 socket.on("connect", function() {
@@ -179,40 +180,9 @@ function updateAvatar(element, picUrl, name) {
     element.style.backgroundSize = 'cover';
     element.style.backgroundPosition = 'center';
     element.innerHTML = '';
-    
-    // إضافة تأثير تحميل
-    element.style.position = 'relative';
-    if (!element.querySelector('.avatar-loading')) {
-      const loading = document.createElement('div');
-      loading.className = 'avatar-loading';
-      loading.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-      loading.style.position = 'absolute';
-      loading.style.top = '50%';
-      loading.style.left = '50%';
-      loading.style.transform = 'translate(-50%, -50%)';
-      loading.style.color = 'white';
-      element.appendChild(loading);
-      
-      // إخفاء المؤشر بعد تحميل الصورة
-      const img = new Image();
-      img.onload = function() {
-        setTimeout(() => {
-          if (loading.parentNode) {
-            loading.remove();
-          }
-        }, 500);
-      };
-      img.src = picUrl;
-    }
   } else {
     element.style.backgroundImage = 'none';
     element.innerHTML = getInitials(name);
-    
-    // إزالة مؤشر التحميل إذا كان موجوداً
-    const loading = element.querySelector('.avatar-loading');
-    if (loading) {
-      loading.remove();
-    }
   }
 }
 
@@ -602,6 +572,7 @@ function showMessage(data, isSelf) {
     if (data.media_type === 'image') {
       content += '<div class="message-media"><img src="' + data.media + '" onclick="viewImage(\'' + data.media + '\')" loading="lazy" alt="صورة" class="media-preview"></div>';
     } else if (data.media_type === 'audio') {
+      // عرض ريكورد صوتي
       content += '<div class="message-audio"><audio controls preload="none"><source src="' + data.media + '" type="audio/ogg"></audio></div>';
     } else if (data.media_type === 'video') {
       content += '<div class="message-video"><video controls preload="metadata"><source src="' + data.media + '"></video></div>';
@@ -680,7 +651,8 @@ function sendVoiceMessage(filePath) {
     to: currentChat,
     filePath: filePath,
     mediaType: 'audio',
-    caption: 'رسالة صوتية 🎤'
+    isVoiceMessage: true,
+    caption: ''
   });
   
   showNotification("تم إرسال الرسالة الصوتية", "success");
