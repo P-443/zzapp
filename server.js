@@ -31,7 +31,7 @@ const avatarsDir = path.join(__dirname, 'public', 'avatars');
   }
 });
 
-// إعداد multer للرفع - قبول جميع أنواع الملفات
+// إعداد multer للرفع
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
@@ -47,7 +47,6 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    // قبول جميع أنواع الملفات
     cb(null, true);
   }
 });
@@ -77,7 +76,7 @@ async function updateDatabaseSchema() {
   try {
     console.log("🔄 جاري تحديث هيكل قاعدة البيانات...");
     
-    // التحقق من وجود عمود display_name في جدول zzapp_chats وإضافته إذا لم يكن موجوداً
+    // التحقق من وجود عمود display_name في جدول zzapp_chats
     const checkColumnQuery = `
       SELECT column_name 
       FROM information_schema.columns 
@@ -92,10 +91,9 @@ async function updateDatabaseSchema() {
         ALTER TABLE zzapp_chats 
         ADD COLUMN display_name TEXT
       `);
-      console.log("✅ تم إضافة عمود display_name");
     }
     
-    // التحقق من وجود عمود pic_cached وإضافته إذا لم يكن موجوداً
+    // التحقق من وجود عمود pic_cached
     const checkPicCachedQuery = `
       SELECT column_name 
       FROM information_schema.columns 
@@ -110,7 +108,49 @@ async function updateDatabaseSchema() {
         ALTER TABLE zzapp_chats 
         ADD COLUMN pic_cached BOOLEAN DEFAULT false
       `);
-      console.log("✅ تم إضافة عمود pic_cached");
+    }
+    
+    // التحقق من وجود عمود session_id في المفتاح الأساسي
+    const checkPrimaryKeyQuery = `
+      SELECT constraint_name, column_name
+      FROM information_schema.key_column_usage
+      WHERE table_name = 'zzapp_chats'
+      ORDER BY ordinal_position;
+    `;
+    
+    const pkResult = await pool.query(checkPrimaryKeyQuery);
+    const pkColumns = pkResult.rows.map(row => row.column_name);
+    
+    // إذا كان المفتاح الأساسي يحتوي فقط على id بدون session_id، نقوم بتعديله
+    if (pkColumns.length === 1 && pkColumns[0] === 'id') {
+      console.log("🔄 جاري تعديل المفتاح الأساسي ليشمل session_id...");
+      
+      // إضافة عمود مؤقت لحل مشكلة التكرار
+      await pool.query(`
+        ALTER TABLE zzapp_chats 
+        ADD COLUMN IF NOT EXISTS temp_unique_id TEXT GENERATED ALWAYS AS (id || '|' || COALESCE(session_id, '')) STORED
+      `);
+      
+      // حذف السجلات المكررة
+      await pool.query(`
+        DELETE FROM zzapp_chats 
+        WHERE ctid IN (
+          SELECT ctid FROM (
+            SELECT ctid, ROW_NUMBER() OVER (PARTITION BY id, session_id ORDER BY updated_at DESC) as rn
+            FROM zzapp_chats
+          ) t 
+          WHERE t.rn > 1
+        )
+      `);
+      
+      // إسقاط المفتاح الأساسي القديم
+      await pool.query(`ALTER TABLE zzapp_chats DROP CONSTRAINT IF EXISTS zzapp_chats_pkey`);
+      
+      // إنشاء مفتاح أساسي جديد
+      await pool.query(`ALTER TABLE zzapp_chats ADD PRIMARY KEY (id, session_id)`);
+      
+      // حذف العمود المؤقت
+      await pool.query(`ALTER TABLE zzapp_chats DROP COLUMN IF EXISTS temp_unique_id`);
     }
     
     console.log("✅ تم تحديث هيكل قاعدة البيانات بنجاح");
@@ -140,7 +180,7 @@ async function setupDatabase() {
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS zzapp_chats (
-        id TEXT PRIMARY KEY,
+        id TEXT,
         name TEXT,
         display_name TEXT,
         number TEXT,
@@ -154,7 +194,8 @@ async function setupDatabase() {
         updated_at TIMESTAMP DEFAULT NOW(),
         is_group BOOLEAN DEFAULT false,
         is_pinned BOOLEAN DEFAULT false,
-        session_id TEXT
+        session_id TEXT,
+        PRIMARY KEY (id, session_id)
       )
     `);
 
@@ -186,9 +227,9 @@ async function setupDatabase() {
     try {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_chats_session ON zzapp_chats(session_id);
-        CREATE INDEX IF NOT EXISTS idx_messages_chat ON zzapp_messages(chat_id);
-        CREATE INDEX IF NOT EXISTS idx_messages_session ON zzapp_messages(session_id);
-        CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON zzapp_messages(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_chats_updated ON zzapp_chats(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_chat_session ON zzapp_messages(chat_id, session_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON zzapp_messages(timestamp DESC);
       `);
     } catch (indexError) {
       console.log("⚠️ خطأ في إنشاء الفهارس:", indexError.message);
@@ -264,23 +305,28 @@ function cleanDisplayName(name, contactId) {
   return cleanName || extractNumberFromId(contactId);
 }
 
-// دالة لتحويل الصور إلى صيغة 3gp مخففة الجودة
-async function convertTo3GP(imageBuffer) {
+// دالة لتحويل الصور إلى JPEG مضغوط
+async function compressImage(imageBuffer, quality = 50) {
   try {
-    // تحويل الصورة إلى JPEG بجودة 30% ثم إعادة تسميتها كـ 3gp
-    const convertedBuffer = await sharp(imageBuffer)
-      .jpeg({ quality: 30 })
+    // تحويل الصورة إلى JPEG بجودة محددة
+    const compressedBuffer = await sharp(imageBuffer)
+      .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ 
+        quality: quality,
+        progressive: true,
+        optimizeScans: true
+      })
       .toBuffer();
     
-    return convertedBuffer;
+    return compressedBuffer;
   } catch (error) {
-    console.log("⚠️ خطأ في تحويل الصورة، استخدام النسخة الأصلية:", error.message);
+    console.log("⚠️ خطأ في ضغط الصورة، استخدام النسخة الأصلية:", error.message);
     return imageBuffer;
   }
 }
 
 // دالة للحصول على معلومات جهة الاتصال
-async function getContactInfo(contactId) {
+async function getContactInfo(contactId, sessionId) {
   try {
     if (!client) return null;
     
@@ -300,6 +346,11 @@ async function getContactInfo(contactId) {
           isGroup = true;
           displayName = name;
         }
+        
+        // الحصول على الوصف للمجموعات
+        if (chat.isGroup && chat.description) {
+          about = chat.description;
+        }
       }
     } catch (e) {
       console.log("⚠️ لا يمكن الحصول على معلومات المحادثة:", e.message);
@@ -309,7 +360,7 @@ async function getContactInfo(contactId) {
     try {
       const profilePicUrl = await client.getProfilePicUrl(contactId);
       if (profilePicUrl) {
-        const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.3gp`;
+        const cacheFileName = `profile_${contactId.replace(/[@\.]/g, '_')}.jpg`;
         const cachePath = path.join(cacheDir, cacheFileName);
         const avatarPath = path.join(avatarsDir, cacheFileName);
         
@@ -319,8 +370,8 @@ async function getContactInfo(contactId) {
           const now = new Date();
           const cacheAge = now - stats.mtime;
           
-          // تحديث الصورة إذا كانت عمرها أكثر من 24 ساعة
-          if (cacheAge > 86400000) {
+          // تحديث الصورة إذا كانت عمرها أكثر من 7 أيام
+          if (cacheAge > 7 * 86400000) {
             await downloadAndCacheImage(profilePicUrl, cachePath, avatarPath);
           }
           pic = `/cache/${cacheFileName}`;
@@ -343,7 +394,8 @@ async function getContactInfo(contactId) {
       about: about,
       pic: pic,
       is_group: isGroup,
-      pic_cached: !!pic
+      pic_cached: !!pic,
+      session_id: sessionId
     };
   } catch (e) {
     console.log("⚠️ خطأ في الحصول على معلومات جهة الاتصال:", e.message);
@@ -355,7 +407,8 @@ async function getContactInfo(contactId) {
       about: "",
       pic: null,
       is_group: contactId.includes('@g.us'),
-      pic_cached: false
+      pic_cached: false,
+      session_id: sessionId
     };
   }
 }
@@ -368,15 +421,15 @@ async function downloadAndCacheImage(url, cachePath, avatarPath = null) {
     
     const buffer = await response.buffer();
     
-    // تحويل الصورة إلى 3gp مخففة الجودة
-    const convertedBuffer = await convertTo3GP(buffer);
+    // ضغط الصورة إلى JPEG بجودة 50%
+    const compressedBuffer = await compressImage(buffer, 50);
     
     // حفظ في مجلد الكاش
-    fs.writeFileSync(cachePath, convertedBuffer);
+    fs.writeFileSync(cachePath, compressedBuffer);
     
     // حفظ نسخة في مجلد الأفاتار
     if (avatarPath) {
-      fs.writeFileSync(avatarPath, convertedBuffer);
+      fs.writeFileSync(avatarPath, compressedBuffer);
     }
     
     return true;
@@ -409,7 +462,7 @@ async function getUserInfo() {
     try {
       const profilePicUrl = await client.getProfilePicUrl(info.wid._serialized);
       if (profilePicUrl) {
-        const cacheFileName = `user_${info.wid.user}.3gp`;
+        const cacheFileName = `user_${info.wid.user}.jpg`;
         const cachePath = path.join(cacheDir, cacheFileName);
         const avatarPath = path.join(avatarsDir, cacheFileName);
         
@@ -431,7 +484,7 @@ async function getUserInfo() {
       name: info.pushname || info.me?.name || "المستخدم",
       display_name: info.pushname || info.me?.name || "المستخدم",
       number: info.wid.user || 'unknown',
-      about: "",
+      about: info.about || "",
       pic: pic,
       pic_cached: !!pic
     };
@@ -489,6 +542,37 @@ async function restoreSession() {
   } catch (error) {
     console.error("❌ خطأ في استعادة الجلسة:", error.message);
     return null;
+  }
+}
+
+// دالة لتحميل جميع المحادثات
+async function loadAllChats(sessionId) {
+  try {
+    const chatsRes = await pool.query(
+      "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST",
+      [sessionId]
+    );
+    return chatsRes.rows;
+  } catch (e) {
+    console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
+    return [];
+  }
+}
+
+// دالة لتحميل الرسائل
+async function loadMessages(chatId, sessionId) {
+  try {
+    const messagesRes = await pool.query(
+      `SELECT * FROM zzapp_messages 
+       WHERE chat_id = $1 AND session_id = $2
+       ORDER BY timestamp ASC
+       LIMIT 200`,
+      [chatId, sessionId]
+    );
+    return messagesRes.rows;
+  } catch (e) {
+    console.log("⚠️ خطأ في تحميل الرسائل:", e.message);
+    return [];
   }
 }
 
@@ -622,13 +706,10 @@ async function initWhatsApp(sessionId = null) {
       
       io.emit("ready", { sessionId: currentSessionId });
       
-      // تحميل المحادثات
+      // تحميل جميع المحادثات
       try {
-        const chatsRes = await pool.query(
-          "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
-          [currentSessionId]
-        );
-        io.emit("chats", chatsRes.rows);
+        const chats = await loadAllChats(currentSessionId);
+        io.emit("chats", chats);
       } catch (e) {
         console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
         io.emit("chats", []);
@@ -641,7 +722,7 @@ async function initWhatsApp(sessionId = null) {
       try {
         let chatId = msg.id.remote || msg.from;
         let isGroup = chatId.includes('@g.us');
-        let contactInfo = await getContactInfo(chatId);
+        let contactInfo = await getContactInfo(chatId, currentSessionId);
         
         // معالجة الوسائط
         let mediaUrl = null;
@@ -682,7 +763,14 @@ async function initWhatsApp(sessionId = null) {
               const buffer = Buffer.from(media.data, 'base64');
               mediaSize = buffer.length;
               
-              fs.writeFileSync(filePath, buffer);
+              // إذا كانت صورة، نقوم بضغطها
+              if (mediaType === 'image') {
+                const compressedBuffer = await compressImage(buffer, 60);
+                fs.writeFileSync(filePath, compressedBuffer);
+              } else {
+                fs.writeFileSync(filePath, buffer);
+              }
+              
               mediaUrl = `/downloads/${fileName}`;
               mediaName = msg.mediaFilename || fileName;
             }
@@ -716,14 +804,14 @@ async function initWhatsApp(sessionId = null) {
           console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
         }
 
-        // تحديث المحادثة
+        // تحديث المحادثة - استخدام المفتاح المركب
         try {
           await pool.query(
             `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
               updated_at, is_group, session_id, message_count, unread_count)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
                     CASE WHEN $11 = true THEN 0 ELSE 1 END)
-             ON CONFLICT (id) 
+             ON CONFLICT (id, session_id) 
              DO UPDATE SET 
                name = COALESCE($2, zzapp_chats.name),
                display_name = COALESCE($3, zzapp_chats.display_name),
@@ -890,11 +978,8 @@ io.on("connection", async (socket) => {
         }
         
         try {
-          const chatsRes = await pool.query(
-            "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
-            [sessionId]
-          );
-          socket.emit("chats", chatsRes.rows);
+          const chats = await loadAllChats(sessionId);
+          socket.emit("chats", chats);
         } catch (e) {
           console.log("⚠️ خطأ في تحميل المحادثات:", e.message);
           socket.emit("chats", []);
@@ -924,14 +1009,8 @@ io.on("connection", async (socket) => {
   socket.on("get_messages", async (data) => {
     try {
       const { chatId, sessionId } = data;
-      const messagesRes = await pool.query(
-        `SELECT * FROM zzapp_messages 
-         WHERE chat_id = $1 AND session_id = $2
-         ORDER BY timestamp ASC
-         LIMIT 100`,
-        [chatId, sessionId || currentSessionId]
-      );
-      socket.emit("load_messages", messagesRes.rows);
+      const messages = await loadMessages(chatId, sessionId || currentSessionId);
+      socket.emit("load_messages", messages);
     } catch (e) {
       console.log("⚠️ خطأ في تحميل الرسائل:", e.message);
       socket.emit("load_messages", []);
@@ -949,7 +1028,7 @@ io.on("connection", async (socket) => {
       const chatId = data.to.includes('@') ? data.to : `${data.to}@c.us`;
       const message = await client.sendMessage(chatId, data.text);
       
-      const contactInfo = await getContactInfo(chatId);
+      const contactInfo = await getContactInfo(chatId, currentSessionId);
       
       // حفظ الرسالة
       try {
@@ -970,12 +1049,12 @@ io.on("connection", async (socket) => {
         console.log("⚠️ خطأ في حفظ الرسالة:", dbError.message);
       }
 
-      // تحديث المحادثة
+      // تحديث المحادثة - استخدام المفتاح المركب
       try {
         await pool.query(
           `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
-           ON CONFLICT (id) 
+           ON CONFLICT (id, session_id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
              display_name = COALESCE($3, zzapp_chats.display_name),
@@ -1071,7 +1150,7 @@ io.on("connection", async (socket) => {
         sendAudioAsVoice: data.mediaType === 'audio' && data.isVoiceMessage
       });
 
-      const contactInfo = await getContactInfo(chatId);
+      const contactInfo = await getContactInfo(chatId, currentSessionId);
 
       // حفظ في قاعدة البيانات
       try {
@@ -1101,7 +1180,7 @@ io.on("connection", async (socket) => {
         await pool.query(
           `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
-           ON CONFLICT (id) 
+           ON CONFLICT (id, session_id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
              display_name = COALESCE($3, zzapp_chats.display_name),
@@ -1191,7 +1270,7 @@ io.on("connection", async (socket) => {
         console.log("⚠️ لا يمكن إرسال رسالة إلى هذا الرقم:", e.message);
       }
       
-      const contactInfo = await getContactInfo(chatId);
+      const contactInfo = await getContactInfo(chatId, currentSessionId);
       
       let chatData;
       
@@ -1206,7 +1285,8 @@ io.on("connection", async (socket) => {
         } else {
           await pool.query(
             `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, updated_at, session_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+             ON CONFLICT (id, session_id) DO NOTHING`,
             [chatId, 
              contactInfo.name,
              contactInfo.display_name,
@@ -1313,7 +1393,6 @@ app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
     
     const buffer = Buffer.from(base64Data, 'base64');
     
-    // حفظ الرسالة الصوتية كملف ogg
     const filePath = path.join(uploadsDir, fileName || `voice_${Date.now()}.ogg`);
     
     fs.writeFileSync(filePath, buffer);
@@ -1329,14 +1408,8 @@ app.post("/save_voice", express.json({ limit: '50mb' }), async (req, res) => {
 
 app.get("/messages/:chatId/:sessionId", async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT * FROM zzapp_messages 
-       WHERE chat_id = $1 AND session_id = $2
-       ORDER BY timestamp ASC
-       LIMIT 100`,
-      [req.params.chatId, req.params.sessionId]
-    );
-    res.json(result.rows);
+    const messages = await loadMessages(req.params.chatId, req.params.sessionId);
+    res.json(messages);
   } catch (error) {
     console.log("❌ خطأ في جلب الرسائل:", error.message);
     res.status(500).json({ error: "خطأ في السيرفر" });
@@ -1345,11 +1418,8 @@ app.get("/messages/:chatId/:sessionId", async (req, res) => {
 
 app.get("/chats/:sessionId", async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT * FROM zzapp_chats WHERE session_id = $1 ORDER BY COALESCE(last_time, updated_at) DESC NULLS LAST LIMIT 200",
-      [req.params.sessionId]
-    );
-    res.json(result.rows);
+    const chats = await loadAllChats(req.params.sessionId);
+    res.json(chats);
   } catch (error) {
     console.log("❌ خطأ في جلب المحادثات:", error.message);
     res.status(500).json({ error: "خطأ في السيرفر" });
@@ -1420,7 +1490,7 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache-v6').then(cache => {
+    caches.open('zzapp-cache-v7').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
@@ -1440,7 +1510,7 @@ self.addEventListener('activate', event => {
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheName !== 'zzapp-cache-v6') {
+          if (cacheName !== 'zzapp-cache-v7') {
             return caches.delete(cacheName);
           }
         })
@@ -1472,7 +1542,7 @@ self.addEventListener('fetch', event => {
           return response;
         }
         const responseToCache = response.clone();
-        caches.open('zzapp-cache-v6').then(cache => {
+        caches.open('zzapp-cache-v7').then(cache => {
           cache.put(event.request, responseToCache);
         });
         return response;
