@@ -7,9 +7,13 @@
     <meta name="MobileOptimized" content="320">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="theme-color" content="#075e54">
+    <meta name="description" content="ZZApp واتساب - تطبيق واتساب ويب للهواتف القديمة والزرارية">
     <title>ZZApp واتساب</title>
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icon-192x192.png" type="image/png">
 </head>
 <body>
     <!-- شاشة تسجيل الدخول -->
@@ -38,6 +42,7 @@
             <div class="login-footer">
                 <p>مشفر من طرف إلى طرف</p>
                 <p class="small">ZZApp v2.0 - للهواتف القديمة والزرارية</p>
+                <p class="small">يمكن تثبيت التطبيق كمتصفح</p>
             </div>
         </div>
     </div>
@@ -48,7 +53,7 @@
         <div class="chats-header">
             <div class="chats-user-info">
                 <div class="chats-avatar" id="user-avatar">?</div>
-                <div class="chats-user-name" id="user-name">المستخدم</div>
+                <div class="chats-user-name" id="user-name" title="">المستخدم</div>
             </div>
             <div class="chats-actions">
                 <button class="chats-icon-btn" onclick="showNewChat()" title="محادثة جديدة">
@@ -104,7 +109,7 @@
                 <button class="input-btn" onclick="toggleRecord()" id="record-btn" title="تسجيل صوت">
                     <i class="fas fa-microphone"></i>
                 </button>
-                <button class="input-btn" onclick="attachImage()" title="إرسال صورة">
+                <button class="input-btn" onclick="attachImage()" title="إرسال ملف">
                     <i class="fas fa-camera"></i>
                 </button>
             </div>
@@ -136,6 +141,13 @@
                 <div class="bar"></div>
                 <div class="bar"></div>
                 <div class="bar"></div>
+            </div>
+        </div>
+        
+        <!-- منتقي الإيموجي -->
+        <div id="emoji-picker-container" class="emoji-picker-container">
+            <div id="emoji-picker" class="emoji-picker">
+                <!-- الإيموجيات تظهر هنا -->
             </div>
         </div>
     </div>
