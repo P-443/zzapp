@@ -1,6 +1,7 @@
 FROM node:20-bullseye
 
 RUN apt-get update && apt-get install -y \
+  ffmpeg \
   chromium \
   ca-certificates \
   fonts-liberation \
