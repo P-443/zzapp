@@ -1386,7 +1386,144 @@ body.standalone {
 .lazy-load.loaded {
   opacity: 1;
 }
+/* إضافة هذه الأنماط في نهاية ملف style.css */
 
+/* تحسينات للأداء */
+.avatar-img {
+  transition: opacity 0.3s ease;
+}
+
+.avatar-img.loading {
+  opacity: 0.5;
+}
+
+/* تحسين عرض الملفات المرسلة */
+.message-media img,
+.message-video video {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.message-audio audio {
+  width: 100%;
+  max-width: 300px;
+}
+
+/* تحسينات للهواتف القديمة */
+@media (max-width: 320px) {
+  .chat-item {
+    padding: 10px;
+    min-height: 65px;
+  }
+  
+  .chat-avatar {
+    width: 40px;
+    height: 40px;
+    margin-left: 8px;
+  }
+  
+  .chats-icon-btn,
+  .input-btn,
+  .send-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 16px;
+  }
+  
+  .message {
+    max-width: 95%;
+  }
+}
+
+/* تحسينات لوضع عدم الاتصال */
+.offline-message {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #ff9800;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  z-index: 9999;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+}
+
+/* تحسينات للتحميل */
+.spinner {
+  border: 3px solid rgba(255,255,255,0.3);
+  border-radius: 50%;
+  border-top-color: #fff;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* تحسينات للصور */
+.media-preview {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.media-preview:hover {
+  transform: scale(1.02);
+}
+
+/* تحسينات للأزرار */
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+/* تحسينات للنص العربي */
+[dir="rtl"] {
+  font-family: 'Arial', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* تحسينات للشريط العلوي */
+.chats-header,
+.chat-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+/* تحسينات للتمرير */
+.chats-container::-webkit-scrollbar,
+.messages-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.chats-container::-webkit-scrollbar-thumb,
+.messages-container::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.2);
+  border-radius: 2px;
+}
+
+/* تحسينات للرسائل */
+.message {
+  animation: messageAppear 0.3s ease;
+}
+
+@keyframes messageAppear {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
 /* تحسين أزرار الإجراءات */
 .cache-btn, .logout-btn, .install-app-btn {
   animation: fadeInDown 0.5s ease;
