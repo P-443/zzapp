@@ -76,81 +76,78 @@ async function updateDatabaseSchema() {
   try {
     console.log("🔄 جاري تحديث هيكل قاعدة البيانات...");
     
-    // التحقق من وجود عمود display_name في جدول zzapp_chats
-    const checkColumnQuery = `
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'zzapp_chats' AND column_name = 'display_name'
-    `;
+    // التحقق من وجود الجداول أولاً
+    const tablesExist = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'zzapp_sessions'
+      ) as sessions_exist,
+      EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'zzapp_chats'
+      ) as chats_exist,
+      EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'zzapp_messages'
+      ) as messages_exist
+    `);
     
-    const result = await pool.query(checkColumnQuery);
+    const { sessions_exist, chats_exist, messages_exist } = tablesExist.rows[0];
     
-    if (result.rows.length === 0) {
-      console.log("➕ إضافة عمود display_name إلى جدول zzapp_chats...");
-      await pool.query(`
-        ALTER TABLE zzapp_chats 
-        ADD COLUMN display_name TEXT
-      `);
-    }
-    
-    // التحقق من وجود عمود pic_cached
-    const checkPicCachedQuery = `
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'zzapp_chats' AND column_name = 'pic_cached'
-    `;
-    
-    const picCachedResult = await pool.query(checkPicCachedQuery);
-    
-    if (picCachedResult.rows.length === 0) {
-      console.log("➕ إضافة عمود pic_cached إلى جدول zzapp_chats...");
-      await pool.query(`
-        ALTER TABLE zzapp_chats 
-        ADD COLUMN pic_cached BOOLEAN DEFAULT false
-      `);
-    }
-    
-    // التحقق من وجود عمود session_id في المفتاح الأساسي
-    const checkPrimaryKeyQuery = `
-      SELECT constraint_name, column_name
-      FROM information_schema.key_column_usage
-      WHERE table_name = 'zzapp_chats'
-      ORDER BY ordinal_position;
-    `;
-    
-    const pkResult = await pool.query(checkPrimaryKeyQuery);
-    const pkColumns = pkResult.rows.map(row => row.column_name);
-    
-    // إذا كان المفتاح الأساسي يحتوي فقط على id بدون session_id، نقوم بتعديله
-    if (pkColumns.length === 1 && pkColumns[0] === 'id') {
-      console.log("🔄 جاري تعديل المفتاح الأساسي ليشمل session_id...");
-      
-      // إضافة عمود مؤقت لحل مشكلة التكرار
-      await pool.query(`
-        ALTER TABLE zzapp_chats 
-        ADD COLUMN IF NOT EXISTS temp_unique_id TEXT GENERATED ALWAYS AS (id || '|' || COALESCE(session_id, '')) STORED
-      `);
-      
-      // حذف السجلات المكررة
-      await pool.query(`
-        DELETE FROM zzapp_chats 
-        WHERE ctid IN (
-          SELECT ctid FROM (
-            SELECT ctid, ROW_NUMBER() OVER (PARTITION BY id, session_id ORDER BY updated_at DESC) as rn
-            FROM zzapp_chats
-          ) t 
-          WHERE t.rn > 1
-        )
-      `);
-      
-      // إسقاط المفتاح الأساسي القديم
-      await pool.query(`ALTER TABLE zzapp_chats DROP CONSTRAINT IF EXISTS zzapp_chats_pkey`);
-      
-      // إنشاء مفتاح أساسي جديد
-      await pool.query(`ALTER TABLE zzapp_chats ADD PRIMARY KEY (id, session_id)`);
-      
-      // حذف العمود المؤقت
-      await pool.query(`ALTER TABLE zzapp_chats DROP COLUMN IF EXISTS temp_unique_id`);
+    // إصلاح المفتاح الأساسي لجدول zzapp_chats
+    if (chats_exist) {
+      try {
+        // التحقق من المفتاح الأساسي الحالي
+        const checkPkQuery = await pool.query(`
+          SELECT constraint_name, column_name
+          FROM information_schema.key_column_usage
+          WHERE table_name = 'zzapp_chats'
+          ORDER BY ordinal_position;
+        `);
+        
+        const pkColumns = checkPkQuery.rows.map(row => row.column_name);
+        
+        // إذا كان المفتاح الأساسي يحتوي فقط على id، نقوم بتعديله
+        if (pkColumns.length === 1 && pkColumns[0] === 'id') {
+          console.log("🔄 جاري تعديل المفتاح الأساسي ليشمل session_id...");
+          
+          // إضافة session_id كمفتاح مركب مع id
+          await pool.query(`
+            ALTER TABLE zzapp_chats 
+            DROP CONSTRAINT IF EXISTS zzapp_chats_pkey CASCADE;
+          `);
+          
+          // حذف السجلات المكررة أولاً
+          await pool.query(`
+            DELETE FROM zzapp_chats 
+            WHERE ctid IN (
+              SELECT ctid FROM (
+                SELECT ctid, 
+                  ROW_NUMBER() OVER (PARTITION BY id, COALESCE(session_id, 'default') ORDER BY updated_at DESC) as rn
+                FROM zzapp_chats
+              ) t 
+              WHERE t.rn > 1
+            )
+          `);
+          
+          // ضمان أن جميع السجلات لها session_id
+          await pool.query(`
+            UPDATE zzapp_chats 
+            SET session_id = COALESCE(session_id, 'default_session')
+            WHERE session_id IS NULL
+          `);
+          
+          // إنشاء مفتاح أساسي جديد
+          await pool.query(`
+            ALTER TABLE zzapp_chats 
+            ADD PRIMARY KEY (id, session_id)
+          `);
+          
+          console.log("✅ تم تعديل المفتاح الأساسي بنجاح");
+        }
+      } catch (pkError) {
+        console.log("⚠️ خطأ في تعديل المفتاح الأساسي:", pkError.message);
+      }
     }
     
     console.log("✅ تم تحديث هيكل قاعدة البيانات بنجاح");
@@ -243,7 +240,7 @@ async function setupDatabase() {
 }
 
 // إعداد قاعدة البيانات مع إعادة المحاولة
-async function setupDatabaseWithRetry(retries = 3, delay = 5000) {
+async function setupDatabaseWithRetry(retries = 5, delay = 5000) {
   for (let i = 0; i < retries; i++) {
     try {
       await setupDatabase();
@@ -267,6 +264,9 @@ let client = null;
 let userInfo = null;
 let currentSessionId = null;
 let sessionRestoreAttempted = false;
+let whatsappInitializing = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // دالة لاستخراج الرقم من ID
 function extractNumberFromId(contactId) {
@@ -578,8 +578,15 @@ async function loadMessages(chatId, sessionId) {
 
 // دالة لتهيئة واتساب مع إعادة المحاولة
 async function initWhatsApp(sessionId = null) {
+  if (whatsappInitializing) {
+    console.log("⏳ واتساب بالفعل قيد التشغيل...");
+    return;
+  }
+  
   return new Promise(async (resolve, reject) => {
     console.log("🔧 جاري تشغيل واتساب...");
+    whatsappInitializing = true;
+    reconnectAttempts = 0;
 
     if (client) {
       try {
@@ -660,6 +667,7 @@ async function initWhatsApp(sessionId = null) {
     client.on("authenticated", async () => {
       console.log("✅ تم تسجيل الدخول");
       qrCode = null;
+      reconnectAttempts = 0;
       
       try {
         await pool.query(
@@ -675,6 +683,8 @@ async function initWhatsApp(sessionId = null) {
       console.log("🚀 واتساب جاهز للاستخدام");
       isReady = true;
       qrCode = null;
+      whatsappInitializing = false;
+      reconnectAttempts = 0;
       
       try {
         userInfo = await getUserInfo();
@@ -900,6 +910,8 @@ async function initWhatsApp(sessionId = null) {
     client.on("disconnected", async (reason) => {
       console.log("❌ انقطع الاتصال:", reason);
       isReady = false;
+      whatsappInitializing = false;
+      reconnectAttempts++;
       
       try {
         await pool.query(
@@ -910,16 +922,21 @@ async function initWhatsApp(sessionId = null) {
         console.log("⚠️ خطأ في تحديث الجلسة:", e.message);
       }
       
-      // إعادة التشغيل بعد 10 ثواني
+      // إعادة التشغيل بعد 5 ثواني
       setTimeout(() => {
-        console.log("🔄 إعادة تشغيل واتساب بعد انقطاع...");
-        initWhatsAppWithRetry(currentSessionId);
-      }, 10000);
+        if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+          console.log(`🔄 إعادة تشغيل واتساب بعد انقطاع (المحاولة ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+          initWhatsAppWithRetry(currentSessionId);
+        } else {
+          console.log("❌ تجاوزت الحد الأقصى لمحاولات إعادة الاتصال");
+        }
+      }, 5000);
     });
 
     client.on("auth_failure", (message) => {
       console.log("❌ فشل المصادقة:", message);
       isReady = false;
+      whatsappInitializing = false;
       reject(new Error("فشل المصادقة: " + message));
     });
 
@@ -928,13 +945,14 @@ async function initWhatsApp(sessionId = null) {
       console.log("✅ تم تشغيل واتساب بنجاح");
     } catch (error) {
       console.error("❌ فشل تشغيل واتساب:", error.message);
+      whatsappInitializing = false;
       reject(error);
     }
   });
 }
 
 // دالة لإعادة المحاولة مع زيادة التباعد
-async function initWhatsAppWithRetry(sessionId = null, retries = 10, delay = 10000) {
+async function initWhatsAppWithRetry(sessionId = null, retries = 5, delay = 10000) {
   for (let i = 0; i < retries; i++) {
     try {
       console.log(`🔄 محاولة تشغيل واتساب (${i + 1}/${retries})...`);
@@ -1113,7 +1131,7 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // إرسال وسائط
+  // إرسال وسائط - الإصلاح النهائي
   socket.on("send_media", async (data) => {
     if (!isReady) {
       socket.emit("error", "واتساب غير متصل");
@@ -1137,18 +1155,66 @@ io.on("connection", async (socket) => {
         return;
       }
 
-      const media = MessageMedia.fromFilePath(mediaPath);
+      // قراءة الملف
+      const fileBuffer = fs.readFileSync(mediaPath);
+      const fileName = path.basename(mediaPath);
+      const fileExtension = path.extname(fileName).toLowerCase();
       
-      // إرسال كرسالة صوتية إذا كان تسجيلاً صوتياً
-      if (data.mediaType === 'audio' && data.isVoiceMessage) {
-        media.mimetype = 'audio/ogg; codecs=opus';
-        media.filename = 'voice.ogg';
+      // تحويل ملفات 3gp إلى jpg إذا كانت صوراً
+      if (fileExtension === '.3gp' && data.mediaType === 'image') {
+        try {
+          // تحويل 3gp إلى jpg
+          const jpgBuffer = await sharp(fileBuffer)
+            .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 80 })
+            .toBuffer();
+          
+          const convertedFileName = fileName.replace('.3gp', '.jpg');
+          const convertedPath = path.join(uploadsDir, convertedFileName);
+          fs.writeFileSync(convertedPath, jpgBuffer);
+          
+          // تحديث البيانات للنسخة المحولة
+          data.filePath = `/uploads/${convertedFileName}`;
+          data.mediaType = 'image';
+          
+          // إعادة استدعاء الدالة بالملف المحول
+          return socket.emit("send_media", data);
+        } catch (error) {
+          console.log("⚠️ فشل تحويل 3gp إلى JPG:", error.message);
+          // استمرار كملف عادي
+        }
       }
 
-      const message = await client.sendMessage(chatId, media, { 
+      // إنشاء كائن Media
+      let media;
+      try {
+        media = MessageMedia.fromFilePath(mediaPath);
+      } catch (error) {
+        console.log("⚠️ خطأ في تحميل الوسائط، محاولة قراءة كـ buffer:", error.message);
+        
+        // تحديد MIME type
+        let mimeType;
+        if (data.mediaType === 'image') {
+          mimeType = 'image/jpeg';
+        } else if (data.mediaType === 'audio') {
+          mimeType = data.isVoiceMessage ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+        } else if (data.mediaType === 'video') {
+          mimeType = 'video/mp4';
+        } else {
+          mimeType = 'application/octet-stream';
+        }
+        
+        media = new MessageMedia(mimeType, fileBuffer.toString('base64'), fileName);
+      }
+      
+      // إعداد خيارات الإرسال
+      const options = {
         caption: data.caption || '',
         sendAudioAsVoice: data.mediaType === 'audio' && data.isVoiceMessage
-      });
+      };
+
+      // إرسال الوسائط
+      const message = await client.sendMessage(chatId, media, options);
 
       const contactInfo = await getContactInfo(chatId, currentSessionId);
 
@@ -1169,7 +1235,7 @@ io.on("connection", async (socket) => {
            data.filePath, 
            data.mediaType,
            stats.size,
-           path.basename(mediaPath),
+           fileName,
            true]
         );
       } catch (dbError) {
@@ -1211,7 +1277,7 @@ io.on("connection", async (socket) => {
         text: data.caption || "[وسائط]",
         media: data.filePath,
         media_type: data.mediaType,
-        media_name: path.basename(mediaPath),
+        media_name: fileName,
         timestamp: new Date().toISOString(),
         is_from_me: true,
         sender_name: "أنا",
@@ -1238,7 +1304,31 @@ io.on("connection", async (socket) => {
 
     } catch (error) {
       console.log("❌ فشل إرسال الوسائط:", error.message);
-      socket.emit("error", "فشل إرسال الوسائط: " + error.message);
+      
+      // محاولة إرسال كملف عادي
+      try {
+        const media = MessageMedia.fromFilePath(mediaPath);
+        const message = await client.sendMessage(chatId, media, { 
+          caption: data.caption || ''
+        });
+        
+        socket.emit("message", {
+          chat_id: data.to,
+          message_id: message.id._serialized,
+          text: data.caption || "[وسائط]",
+          media: data.filePath,
+          media_type: data.mediaType,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          sender_name: "أنا",
+          sender_number: "me",
+          session_id: currentSessionId
+        });
+        
+      } catch (retryError) {
+        console.log("❌ فشل الإرسال البديل أيضًا:", retryError.message);
+        socket.emit("error", "فشل إرسال الوسائط: " + error.message);
+      }
     }
   });
 
@@ -1337,6 +1427,8 @@ io.on("connection", async (socket) => {
         isReady = false;
         userInfo = null;
         sessionRestoreAttempted = false;
+        whatsappInitializing = false;
+        reconnectAttempts = 0;
         
         try {
           await pool.query("DELETE FROM zzapp_sessions WHERE session_id = $1", [currentSessionId]);
@@ -1444,7 +1536,9 @@ app.get("/status", (req, res) => {
     hasQr: !!qrCode,
     sessionId: currentSessionId,
     status: isReady ? "ready" : qrCode ? "qr" : "waiting",
-    sessionRestored: sessionRestoreAttempted
+    sessionRestored: sessionRestoreAttempted,
+    whatsappInitializing: whatsappInitializing,
+    reconnectAttempts: reconnectAttempts
   });
 });
 
@@ -1490,7 +1584,7 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache-v7').then(cache => {
+    caches.open('zzapp-cache-v9').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
@@ -1510,7 +1604,7 @@ self.addEventListener('activate', event => {
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheName !== 'zzapp-cache-v7') {
+          if (cacheName !== 'zzapp-cache-v9') {
             return caches.delete(cacheName);
           }
         })
@@ -1542,7 +1636,7 @@ self.addEventListener('fetch', event => {
           return response;
         }
         const responseToCache = response.clone();
-        caches.open('zzapp-cache-v7').then(cache => {
+        caches.open('zzapp-cache-v9').then(cache => {
           cache.put(event.request, responseToCache);
         });
         return response;
@@ -1587,7 +1681,9 @@ app.get("/health", (req, res) => {
     whatsapp: isReady ? "ready" : qrCode ? "qr" : "waiting",
     database: "connected",
     uptime: process.uptime(),
-    sessionId: currentSessionId
+    sessionId: currentSessionId,
+    whatsappInitializing: whatsappInitializing,
+    reconnectAttempts: reconnectAttempts
   });
 });
 
