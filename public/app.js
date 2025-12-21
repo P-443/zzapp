@@ -648,6 +648,7 @@ function sendMessage() {
 }
 
 // إرسال رسالة صوتية
+// إرسال رسالة صوتية - محسّن
 function sendVoiceMessage(filePath) {
   if (!currentChat || !currentSessionId) {
     showNotification("اختر محادثة أولاً", "warning");
@@ -656,17 +657,17 @@ function sendVoiceMessage(filePath) {
   
   console.log("🎤 إرسال رسالة صوتية:", filePath);
   
+  // إرسال كرسالة صوتية (PTT)
   socket.emit("send_media", {
     to: currentChat,
     filePath: filePath,
     mediaType: 'audio',
     isVoiceMessage: true,
-    caption: 'رسالة صوتية'
+    caption: 'رسالة صوتية 🎤'
   });
   
-  showNotification("تم إرسال الرسالة الصوتية", "success");
+  showNotification("جارٍ إرسال الرسالة الصوتية...", "info");
 }
-
 // بدء تسجيل صوتي
 function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
