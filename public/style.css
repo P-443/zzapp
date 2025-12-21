@@ -172,6 +172,22 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     color: white;
+    cursor: pointer;
+    position: relative;
+}
+
+.chats-user-name:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: -30px;
+    right: 0;
+    background: #333;
+    color: white;
+    padding: 5px 10px;
+    border-radius: 5px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 1000;
 }
 
 .chats-actions {
@@ -313,6 +329,14 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+}
+
+.chat-about {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: normal;
+    display: block;
+    margin-top: 2px;
 }
 
 .chat-time {
@@ -742,6 +766,61 @@ body {
     100% { height: 35px; }
 }
 
+/* منتقي الإيموجي */
+.emoji-picker-container {
+    position: absolute;
+    bottom: 80px;
+    left: 10px;
+    right: 10px;
+    background: white;
+    border-radius: 15px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    z-index: 1000;
+    max-height: 300px;
+    overflow-y: auto;
+    display: none;
+}
+
+.emoji-picker {
+    padding: 15px;
+}
+
+.emoji-section {
+    margin-bottom: 15px;
+}
+
+.emoji-section h4 {
+    color: #075e54;
+    margin-bottom: 10px;
+    font-size: 14px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #eee;
+}
+
+.emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 8px;
+}
+
+.emoji-item {
+    font-size: 24px;
+    cursor: pointer;
+    text-align: center;
+    padding: 5px;
+    border-radius: 8px;
+    transition: background 0.2s;
+}
+
+.emoji-item:hover {
+    background: #f0f0f0;
+}
+
+.emoji-item:active {
+    background: #e0e0e0;
+    transform: scale(0.9);
+}
+
 /* النوافذ المنبثقة */
 .modal {
     position: fixed;
@@ -1069,6 +1148,16 @@ body {
         margin: 10px;
         max-height: 80vh;
     }
+    
+    .emoji-grid {
+        grid-template-columns: repeat(6, 1fr);
+        gap: 6px;
+    }
+    
+    .emoji-item {
+        font-size: 20px;
+        padding: 4px;
+    }
 }
 
 /* تحسينات للأداء على الهواتف القديمة */
@@ -1085,41 +1174,94 @@ img, audio, video {
 /* إخفاء شريط التمرير ولكن مع إمكانية التمرير */
 .chats-container::-webkit-scrollbar,
 .messages-container::-webkit-scrollbar,
-.modal-content::-webkit-scrollbar {
+.modal-content::-webkit-scrollbar,
+.emoji-picker-container::-webkit-scrollbar {
     width: 4px;
 }
 
 .chats-container::-webkit-scrollbar-track,
 .messages-container::-webkit-scrollbar-track,
-.modal-content::-webkit-scrollbar-track {
+.modal-content::-webkit-scrollbar-track,
+.emoji-picker-container::-webkit-scrollbar-track {
     background: transparent;
 }
 
 .chats-container::-webkit-scrollbar-thumb,
 .messages-container::-webkit-scrollbar-thumb,
-.modal-content::-webkit-scrollbar-thumb {
+.modal-content::-webkit-scrollbar-thumb,
+.emoji-picker-container::-webkit-scrollbar-thumb {
     background: rgba(0, 0, 0, 0.2);
     border-radius: 2px;
 }
 
 .chats-container::-webkit-scrollbar-thumb:hover,
 .messages-container::-webkit-scrollbar-thumb:hover,
-.modal-content::-webkit-scrollbar-thumb:hover {
+.modal-content::-webkit-scrollbar-thumb:hover,
+.emoji-picker-container::-webkit-scrollbar-thumb:hover {
     background: rgba(0, 0, 0, 0.3);
 }
 
 /* دعم اللمس */
-button, .chat-item, input, textarea {
+button, .chat-item, input, textarea, .emoji-item {
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;
 }
 
-button:active, .chat-item:active, input:active, textarea:active {
+button:active, .chat-item:active, input:active, textarea:active, .emoji-item:active {
     opacity: 0.7;
 }
 
 /* تحسين عرض النصوص العربية */
 [dir="rtl"] {
     text-align: right;
+}
+
+/* تخصيص شريط التمرير */
+*::-webkit-scrollbar {
+    width: 6px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.2);
+    border-radius: 3px;
+}
+
+/* تحسين عرض الصور في الرسائل */
+.message-media img {
+    max-width: 100%;
+    height: auto;
+    object-fit: contain;
+}
+
+/* تحسين عرض الفيديو */
+.message-video video {
+    max-width: 100%;
+    height: auto;
+    background: #000;
+}
+
+/* تحسين عرض المستندات */
+.message-document a {
+    word-break: break-all;
+}
+
+/* تحسين عرض الوقت */
+.message-time {
+    font-family: monospace;
+}
+
+/* تحسين المنتقي الإيموجي للهواتف */
+@media (max-width: 360px) {
+    .emoji-grid {
+        grid-template-columns: repeat(5, 1fr);
+    }
+    
+    .emoji-item {
+        font-size: 18px;
+    }
 }
