@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="MobileOptimized" content="320">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <title>ZZApp واتساب</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <!-- شاشة تسجيل الدخول -->
+    <div id="login" class="screen active">
+        <div class="login-container">
+            <div class="login-logo">
+                <i class="fab fa-whatsapp"></i>
+                <h1>ZZApp واتساب</h1>
+            </div>
+            
+            <div class="qr-section" id="qr-section">
+                <div class="status" id="status">جارٍ الاتصال...</div>
+                <img id="qr" src="" alt="QR Code" class="qr-img">
+                <div class="instructions">
+                    <h3>للتسجيل:</h3>
+                    <ol>
+                        <li>افتح واتساب على هاتفك</li>
+                        <li>اضغط على القائمة (النقاط الثلاث)</li>
+                        <li>اختر "الأجهزة المرتبطة"</li>
+                        <li>اضغط "ربط جهاز"</li>
+                        <li>صور رمز QR أعلاه</li>
+                    </ol>
+                </div>
+            </div>
+            
+            <div class="login-footer">
+                <p>مشفر من طرف إلى طرف</p>
+                <p class="small">ZZApp v2.0 - للهواتف القديمة والزرارية</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- شاشة المحادثات -->
+    <div id="chats" class="screen">
+        <!-- شريط الرأس -->
+        <div class="chats-header">
+            <div class="chats-user-info">
+                <div class="chats-avatar" id="user-avatar">?</div>
+                <div class="chats-user-name" id="user-name">المستخدم</div>
+            </div>
+            <div class="chats-actions">
+                <button class="chats-icon-btn" onclick="showNewChat()" title="محادثة جديدة">
+                    <i class="fas fa-comment-medical"></i>
+                </button>
+                <button class="chats-icon-btn" onclick="refreshChats()" title="تحديث">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+        </div>
+        
+        <!-- شريط البحث -->
+        <div class="chats-search-box">
+            <i class="fas fa-search"></i>
+            <input type="text" id="search-input" placeholder="ابحث عن محادثة..." 
+                   oninput="searchChats(this.value)">
+        </div>
+        
+        <!-- قائمة المحادثات -->
+        <div class="chats-container" id="chats-container">
+            <div class="chats-list" id="chats-list">
+                <!-- المحادثات تظهر هنا -->
+            </div>
+        </div>
+    </div>
+
+    <!-- شاشة المحادثة -->
+    <div id="chat" class="screen">
+        <!-- رأس المحادثة -->
+        <div class="chat-header">
+            <button class="back-btn" onclick="goBack()" title="رجوع">
+                <i class="fas fa-arrow-left"></i>
+            </button>
+            <div class="chat-contact">
+                <div class="chat-contact-avatar" id="chat-contact-avatar">
+                    ?
+                </div>
+                <div class="chat-contact-info">
+                    <div class="chat-contact-name" id="chat-contact-name">...</div>
+                    <div class="chat-contact-status" id="chat-contact-status">جارٍ التحميل...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- منطقة الرسائل -->
+        <div class="messages-container" id="messages-container">
+            <!-- الرسائل تظهر هنا -->
+        </div>
+        
+        <!-- منطقة الإرسال -->
+        <div class="message-input-area" id="message-input-area">
+            <div class="input-buttons">
+                <button class="input-btn" onclick="toggleRecord()" id="record-btn" title="تسجيل صوت">
+                    <i class="fas fa-microphone"></i>
+                </button>
+                <button class="input-btn" onclick="attachImage()" title="إرسال صورة">
+                    <i class="fas fa-camera"></i>
+                </button>
+            </div>
+            
+            <div class="text-input-container">
+                <input type="text" id="message-input" placeholder="اكتب رسالة..." 
+                       onkeypress="handleInputKeyPress(event)" autocomplete="off">
+            </div>
+            
+            <button class="send-btn" onclick="sendMessage()" id="send-btn" title="إرسال">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+        </div>
+        
+        <!-- منطقة التسجيل الصوتي -->
+        <div class="recording-area" id="recording-area">
+            <div class="recording-controls">
+                <div class="recording-timer" id="recording-timer">00:00</div>
+                <button class="record-btn stop" onclick="stopRecording()" id="stop-record-btn">
+                    <i class="fas fa-stop"></i>
+                </button>
+                <button class="record-btn cancel" onclick="cancelRecording()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="recording-visualizer" id="recording-visualizer">
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- نافذة المحادثة الجديدة -->
+    <div id="new-chat-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>محادثة جديدة</h3>
+                <button class="close-btn" onclick="closeNewChat()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>أدخل رقم الهاتف:</p>
+                <input type="tel" id="new-chat-number" 
+                       placeholder="مثال: 20123456789" 
+                       pattern="[0-9]+"
+                       maxlength="15"
+                       onkeypress="return isNumberKey(event)">
+                <div class="modal-actions">
+                    <button class="btn secondary" onclick="closeNewChat()">إلغاء</button>
+                    <button class="btn primary" onclick="createNewChat()">ابدأ المحادثة</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- رسائل التنبيه -->
+    <div id="notification" class="notification" style="display: none;"></div>
+
+    <!-- تحميل -->
+    <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+        <div class="loading-text">جارٍ التحميل...</div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
