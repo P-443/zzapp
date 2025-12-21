@@ -10,12 +10,12 @@ var recordingStartTime = null;
 var currentUser = null;
 var currentSessionId = null;
 var emojiHistory = JSON.parse(localStorage.getItem('emojiHistory')) || [];
+var chatsCache = {};
 
 // أحداث السوكيت
 socket.on("connect", function() {
   console.log("✅ متصل بالسيرفر");
   
-  // محاولة استعادة الجلسة
   const savedSession = localStorage.getItem('whatsapp_session');
   if (savedSession) {
     socket.emit("restore_session", savedSession);
@@ -36,7 +36,6 @@ socket.on("qr", function(data) {
   document.getElementById("qr").src = data.qr;
   document.getElementById("status").innerHTML = "مسح الكود للدخول";
   
-  // حفظ معرف الجلسة
   if (data.sessionId) {
     currentSessionId = data.sessionId;
     localStorage.setItem('whatsapp_session', data.sessionId);
@@ -68,14 +67,11 @@ socket.on("user_info", function(user) {
   console.log("👤 معلومات المستخدم:", user);
   currentUser = user;
   
-  // تحديث واجهة المستخدم
-  document.getElementById("user-name").textContent = user.name || user.number;
+  document.getElementById("user-name").textContent = user.display_name || user.name || user.number;
   
-  // عرض صورة المستخدم إذا كانت متوفرة
   var userAvatar = document.getElementById("user-avatar");
-  updateAvatar(userAvatar, user.pic, user.name || user.number);
+  updateAvatar(userAvatar, user.pic, user.display_name || user.name || user.number);
   
-  // عرض البايو إذا كان موجوداً
   if (user.about) {
     document.getElementById("user-name").title = user.about;
   }
@@ -83,16 +79,22 @@ socket.on("user_info", function(user) {
 
 socket.on("chats", function(chats) {
   console.log("💬 تم تحميل " + chats.length + " محادثة");
+  chatsCache = {};
+  chats.forEach(chat => {
+    chatsCache[chat.id] = chat;
+  });
   showChats(chats);
 });
 
 socket.on("chat_update", function(chat) {
   console.log("🔄 تم تحديث محادثة");
+  chatsCache[chat.id] = chat;
   updateChatInList(chat);
 });
 
 socket.on("new_chat_started", function(chat) {
   console.log("➕ محادثة جديدة");
+  chatsCache[chat.id] = chat;
   addChatToList(chat);
   openChat(chat);
   showNotification("تم بدء محادثة جديدة", "success");
@@ -101,11 +103,9 @@ socket.on("new_chat_started", function(chat) {
 socket.on("message", function(data) {
   console.log("📩 رسالة جديدة");
   
-  // التحقق من أن الرسالة تنتمي للجلسة الحالية
   if (data.session_id !== currentSessionId) return;
   
   if (currentChat && data.chat_id === currentChat) {
-    // التحقق من عدم وجود الرسالة مسبقاً
     if (!isMessageExists(data.message_id)) {
       showMessage(data, data.is_from_me);
       scrollToBottom();
@@ -113,7 +113,6 @@ socket.on("message", function(data) {
     }
   }
   
-  // تحديث معاينة المحادثة
   updateChatPreview(data.chat_id, data.text || "[وسائط]", new Date().toISOString());
 });
 
@@ -176,13 +175,44 @@ function updateAvatar(element, picUrl, name) {
   if (!element) return;
   
   if (picUrl) {
-    element.style.backgroundImage = `url('${picUrl}')`;
+    element.style.backgroundImage = `url('${picUrl}?t=${Date.now()}')`;
     element.style.backgroundSize = 'cover';
     element.style.backgroundPosition = 'center';
     element.innerHTML = '';
+    
+    // إضافة تأثير تحميل
+    element.style.position = 'relative';
+    if (!element.querySelector('.avatar-loading')) {
+      const loading = document.createElement('div');
+      loading.className = 'avatar-loading';
+      loading.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+      loading.style.position = 'absolute';
+      loading.style.top = '50%';
+      loading.style.left = '50%';
+      loading.style.transform = 'translate(-50%, -50%)';
+      loading.style.color = 'white';
+      element.appendChild(loading);
+      
+      // إخفاء المؤشر بعد تحميل الصورة
+      const img = new Image();
+      img.onload = function() {
+        setTimeout(() => {
+          if (loading.parentNode) {
+            loading.remove();
+          }
+        }, 500);
+      };
+      img.src = picUrl;
+    }
   } else {
     element.style.backgroundImage = 'none';
     element.innerHTML = getInitials(name);
+    
+    // إزالة مؤشر التحميل إذا كان موجوداً
+    const loading = element.querySelector('.avatar-loading');
+    if (loading) {
+      loading.remove();
+    }
   }
 }
 
@@ -194,8 +224,12 @@ function showScreen(screenName) {
   });
   document.getElementById(screenName).classList.add("active");
   
-  // إخفاء منتقي الإيموجي عند تغيير الشاشة
   hideEmojiPicker();
+  
+  // عند العودة للمحادثات، تحديث العرض
+  if (screenName === "chats") {
+    setTimeout(refreshChats, 100);
+  }
 }
 
 // تحميل المحادثات
@@ -206,7 +240,7 @@ function loadChats() {
   }
   
   showLoading(true);
-  fetch(`/chats/${currentSessionId}`)
+  fetch(`/chats/${currentSessionId}?t=${Date.now()}`)
     .then(function(response) { 
       if (!response.ok) throw new Error('فشل تحميل المحادثات');
       return response.json(); 
@@ -237,7 +271,6 @@ function refreshChats() {
 // عرض المحادثات
 function showChats(chats) {
   var container = document.getElementById("chats-list");
-  container.innerHTML = "";
   
   if (!chats || chats.length === 0) {
     container.innerHTML = `
@@ -250,6 +283,11 @@ function showChats(chats) {
     return;
   }
   
+  // حفظ في الكاش
+  chats.forEach(chat => {
+    chatsCache[chat.id] = chat;
+  });
+  
   // ترتيب المحادثات حسب الوقت
   chats.sort(function(a, b) {
     var timeA = a.last_time || a.updated_at || new Date(0);
@@ -257,6 +295,8 @@ function showChats(chats) {
     return new Date(timeB) - new Date(timeA);
   });
   
+  // تحديث القائمة
+  container.innerHTML = "";
   chats.forEach(function(chat) {
     addChatItem(chat);
   });
@@ -279,16 +319,16 @@ function addChatItem(chat) {
   
   var time = formatTime(chat.last_time || chat.updated_at);
   var unreadCount = chat.unread_count || 0;
-  var initials = getInitials(chat.name || chat.number || "?");
+  var initials = getInitials(chat.display_name || chat.name || chat.number || "?");
   
-  // عرض الاسم والرقم والبايو
-  var displayName = chat.name || chat.number || "مستخدم";
+  // عرض الاسم المعروض بدلاً من الاسم الطويل
+  var displayName = chat.display_name || chat.name || chat.number || "مستخدم";
   var displayInfo = displayName;
   
   if (chat.about && chat.about.trim() !== "") {
     displayInfo = `${displayName}<br><small class="chat-about">${chat.about}</small>`;
-  } else if (chat.number && displayName !== chat.number) {
-    displayInfo = `${displayName}<br><small>${chat.number}</small>`;
+  } else if (chat.number && displayName !== chat.number && chat.number !== "جهة اتصال" && chat.number !== "مجموعة") {
+    displayInfo = `${displayName}<br><small class="chat-number">${chat.number}</small>`;
   }
   
   div.innerHTML = `
@@ -316,7 +356,7 @@ function addChatItem(chat) {
     setTimeout(() => {
       var avatar = document.getElementById(`chat-avatar-${chat.id.replace(/[@\.]/g, '-')}`);
       if (avatar) {
-        updateAvatar(avatar, chat.pic, chat.name || chat.number);
+        updateAvatar(avatar, chat.pic, chat.display_name || chat.name || chat.number);
       }
     }, 100);
   }
@@ -331,7 +371,6 @@ function updateChatInList(chat) {
     container.removeChild(existing);
   }
   
-  // أضف المحادثة في البداية
   addChatItem(chat);
 }
 
@@ -355,7 +394,10 @@ function updateChatPreview(chatId, lastMessage, timestamp) {
     }
     
     // نقل المحادثة إلى الأعلى
-    chatItem.parentNode.insertBefore(chatItem, chatItem.parentNode.firstChild);
+    var container = chatItem.parentNode;
+    if (container.firstChild !== chatItem) {
+      container.insertBefore(chatItem, container.firstChild);
+    }
   }
 }
 
@@ -363,10 +405,12 @@ function updateChatPreview(chatId, lastMessage, timestamp) {
 function getInitials(name) {
   if (!name || name.trim() === "") return "?";
   
-  var cleanName = name.replace(/[0-9]/g, '').trim();
+  // إزالة الأرقام والرموز الخاصة
+  var cleanName = name.replace(/[0-9@\.\+]/g, '').trim();
   if (cleanName === "") return name.substring(0, 2);
   
-  var parts = cleanName.split(' ');
+  // تقسيم الاسم وأخذ أول حرفين
+  var parts = cleanName.split(/\s+/);
   if (parts.length >= 2) {
     return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
   }
@@ -400,7 +444,7 @@ function formatTime(dateString) {
       var days = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
       return days[date.getDay()];
     } else {
-      return date.getDate() + "/" + (date.getMonth() + 1);
+      return date.getDate() + "/" + (date.getMonth() + 1) + "/" + date.getFullYear().toString().substr(-2);
     }
   } catch (e) {
     console.error("خطأ في تنسيق الوقت:", e);
@@ -413,29 +457,26 @@ function openChat(chat) {
   currentChat = chat.id;
   currentChatData = chat;
   
-  // إظهار شاشة المحادثة
   showScreen("chat");
   
-  // تحديث معلومات المحادثة
-  var contactName = chat.name || chat.number || "مستخدم";
+  var contactName = chat.display_name || chat.name || chat.number || "مستخدم";
   document.getElementById("chat-contact-name").textContent = contactName;
   
-  // عرض البايو إذا كان موجوداً
   var statusText = "";
   if (chat.about && chat.about.trim() !== "") {
     statusText = chat.about;
   } else if (chat.is_group) {
     statusText = "مجموعة";
+  } else if (chat.number && chat.number !== "جهة اتصال") {
+    statusText = chat.number;
   } else {
-    statusText = chat.number || "مستقبل الرسائل";
+    statusText = "مستقبل الرسائل";
   }
   document.getElementById("chat-contact-status").textContent = statusText;
   
-  // عرض صورة جهة الاتصال
   var contactAvatar = document.getElementById("chat-contact-avatar");
   updateAvatar(contactAvatar, chat.pic, contactName);
   
-  // مسح الرسائل السابقة
   document.getElementById("messages-container").innerHTML = `
     <div class="loading-messages">
       <div class="spinner small"></div>
@@ -443,17 +484,14 @@ function openChat(chat) {
     </div>
   `;
   
-  // تفعيل حقل الإدخال
   document.getElementById("message-input").disabled = false;
   document.getElementById("send-btn").disabled = false;
   
-  // طلب الرسائل
   socket.emit("get_messages", { 
     chatId: chat.id, 
     sessionId: currentSessionId 
   });
   
-  // التركيز على حقل الإدخال
   setTimeout(() => {
     var input = document.getElementById("message-input");
     if (input) {
@@ -470,15 +508,11 @@ function goBack() {
   
   showScreen("chats");
   
-  // إيقاف أي تسجيل جاري
   if (isRecording) {
     stopRecording();
   }
   
-  // إخفاء منتقي الإيموجي
   hideEmojiPicker();
-  
-  // إعادة تحميل المحادثات
   loadChats();
 }
 
@@ -503,7 +537,6 @@ function showMessages(messages) {
   messages.forEach(function(msg) {
     var messageDate = new Date(msg.timestamp).toDateString();
     
-    // إضافة تاريخ إذا تغير
     if (messageDate !== lastDate) {
       var dateDiv = document.createElement("div");
       dateDiv.className = "date-divider";
@@ -540,7 +573,7 @@ function formatDateHeader(dateString) {
   } else if (date.toDateString() === yesterday.toDateString()) {
     return "أمس";
   } else {
-    var options = { day: 'numeric', month: 'long' };
+    var options = { day: 'numeric', month: 'long', year: 'numeric' };
     return date.toLocaleDateString('ar-SA', options);
   }
 }
@@ -555,38 +588,40 @@ function showMessage(data, isSelf) {
   var time = formatTime(data.timestamp);
   var content = "";
   
-  // اسم المرسل (للمجموعات)
   if (data.sender_name && !isSelf && data.sender_name !== "أنا") {
     var displayName = data.sender_name;
-    if (data.sender_number && data.sender_name !== data.sender_number) {
+    if (data.sender_number && data.sender_name !== data.sender_number && 
+        data.sender_number !== "جهة اتصال" && data.sender_number !== "مجموعة") {
       displayName = `${data.sender_name}<br><small>${data.sender_number}</small>`;
     }
     
     content += '<div class="sender-name">' + displayName + '</div>';
   }
   
-  // الوسائط
   if (data.media) {
     if (data.media_type === 'image') {
-      content += '<div class="message-media"><img src="' + data.media + '" onclick="viewImage(\'' + data.media + '\')" loading="lazy" alt="صورة"></div>';
+      content += '<div class="message-media"><img src="' + data.media + '" onclick="viewImage(\'' + data.media + '\')" loading="lazy" alt="صورة" class="media-preview"></div>';
     } else if (data.media_type === 'audio') {
       content += '<div class="message-audio"><audio controls preload="none"><source src="' + data.media + '" type="audio/ogg"></audio></div>';
     } else if (data.media_type === 'video') {
-      content += '<div class="message-video"><video controls><source src="' + data.media + '"></video></div>';
+      content += '<div class="message-video"><video controls preload="metadata"><source src="' + data.media + '"></video></div>';
     } else if (data.media_type === 'document') {
       var fileName = data.media_name || 'ملف مرفق';
-      content += '<div class="message-document"><a href="' + data.media + '" download="' + fileName + '"><i class="fas fa-file"></i> ' + fileName + '</a></div>';
+      content += '<div class="message-document"><a href="' + data.media + '" download="' + fileName + '"><i class="fas fa-file-download"></i> ' + fileName + '</a></div>';
     } else {
       content += '<div class="message-document"><a href="' + data.media + '" download><i class="fas fa-file"></i> ملف مرفق</a></div>';
     }
   }
   
-  // النص
   if (data.text && data.text !== '[وسائط]') {
-    content += '<div class="message-text">' + data.text + '</div>';
+    // تحويل الروابط إلى روابط قابلة للنقر
+    var textWithLinks = data.text.replace(
+      /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig,
+      '<a href="$1" target="_blank" rel="noopener">$1</a>'
+    );
+    content += '<div class="message-text">' + textWithLinks + '</div>';
   }
   
-  // الوقت والحالة
   content += '<div class="message-meta">';
   content += '<div class="message-time">' + time + '</div>';
   if (isSelf) {
@@ -602,6 +637,15 @@ function showMessage(data, isSelf) {
   
   div.innerHTML = content;
   container.appendChild(div);
+  
+  // إضافة تأثير ظهور
+  div.style.opacity = '0';
+  div.style.transform = 'translateY(10px)';
+  setTimeout(() => {
+    div.style.transition = 'opacity 0.3s, transform 0.3s';
+    div.style.opacity = '1';
+    div.style.transform = 'translateY(0)';
+  }, 10);
 }
 
 // إرسال رسالة
@@ -614,20 +658,14 @@ function sendMessage() {
     return;
   }
   
-  // إرسال الرسالة عبر السوكيت
   socket.emit("send_message", {
     to: currentChat,
     text: text
   });
   
-  // مسح حقل الإدخال
   input.value = "";
   input.focus();
-  
-  // تشغيل صوت الإرسال
   playSendSound();
-  
-  // إخفاء منتقي الإيموجي
   hideEmojiPicker();
 }
 
@@ -694,43 +732,51 @@ function startRecording() {
           type: mediaRecorder.mimeType || 'audio/webm' 
         });
         
-        // تحويل إلى ogg
         var reader = new FileReader();
         reader.onloadend = function() {
           var base64data = reader.result;
           var fileName = 'voice_' + Date.now() + '.ogg';
           
-          // حفظ الرسالة الصوتية
-          socket.emit("save_voice_message", {
-            chatId: currentChat,
-            audioData: base64data,
-            fileName: fileName
+          fetch('/save_voice', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              audioData: base64data,
+              fileName: fileName
+            })
+          })
+          .then(response => response.json())
+          .then(result => {
+            if (result.success) {
+              sendVoiceMessage(result.filePath);
+            } else {
+              showNotification("فشل حفظ الرسالة الصوتية", "error");
+            }
+          })
+          .catch(error => {
+            console.error('❌ خطأ في حفظ الرسالة الصوتية:', error);
+            showNotification("فشل حفظ الرسالة الصوتية", "error");
           });
         };
         
         reader.readAsDataURL(audioBlob);
-        
-        // إيقاف الميكروفون
         stream.getTracks().forEach(track => track.stop());
       };
       
-      // بدء التسجيل
-      mediaRecorder.start(100); // جمع البيانات كل 100ms
+      mediaRecorder.start(100);
       recordingStartTime = Date.now();
       
-      // تحديث واجهة التسجيل
       document.getElementById("recording-area").style.display = "block";
       document.getElementById("message-input-area").style.display = "none";
       
-      // تحديث زر التسجيل
       document.getElementById("record-btn").innerHTML = '<i class="fas fa-stop"></i>';
       document.getElementById("record-btn").onclick = stopRecording;
       
-      // بدء المؤقت
       updateRecordingTimer();
       recordingTimer = setInterval(updateRecordingTimer, 1000);
       
-      // تشغيل المؤثرات البصرية
       startVisualizer();
       
     })
@@ -750,15 +796,12 @@ function stopRecording() {
     mediaRecorder.stop();
   }
   
-  // إيقاف المؤقت والمؤثرات
   clearInterval(recordingTimer);
   stopVisualizer();
   
-  // إعادة عرض واجهة الإدخال
   document.getElementById("recording-area").style.display = "none";
   document.getElementById("message-input-area").style.display = "flex";
   
-  // استعادة زر التسجيل
   document.getElementById("record-btn").innerHTML = '<i class="fas fa-microphone"></i>';
   document.getElementById("record-btn").onclick = startRecording;
   
@@ -775,15 +818,12 @@ function cancelRecording() {
     mediaRecorder.stop();
   }
   
-  // إيقاف المؤقت والمؤثرات
   clearInterval(recordingTimer);
   stopVisualizer();
   
-  // إعادة عرض واجهة الإدخال
   document.getElementById("recording-area").style.display = "none";
   document.getElementById("message-input-area").style.display = "flex";
   
-  // استعادة زر التسجيل
   document.getElementById("record-btn").innerHTML = '<i class="fas fa-microphone"></i>';
   document.getElementById("record-btn").onclick = startRecording;
   
@@ -816,7 +856,6 @@ function updateRecordingTimer() {
   var timerText = (minutes < 10 ? '0' : '') + minutes + ":" + (seconds < 10 ? '0' : '') + seconds;
   document.getElementById("recording-timer").textContent = timerText;
   
-  // إيقاف التسجيل تلقائياً بعد 5 دقائق
   if (minutes >= 5) {
     stopRecording();
   }
@@ -849,8 +888,6 @@ function showEmojiPicker() {
   }
   
   pickerContainer.style.display = "block";
-  
-  // تحميل الإيموجيات
   loadEmojis();
 }
 
@@ -865,7 +902,6 @@ function loadEmojis() {
   var emojiPicker = document.getElementById("emoji-picker");
   emojiPicker.innerHTML = "";
   
-  // الإيموجيات الشائعة
   var commonEmojis = [
     "😀", "😂", "🥰", "😎", "😜", "😢", "😠", "😍", "🤔", "👍",
     "👎", "👋", "🎉", "❤️", "🔥", "⭐", "🙏", "💯", "👏", "🤝",
@@ -874,7 +910,6 @@ function loadEmojis() {
     "💪", "🧠", "👀", "👅", "👂", "👃", "💋", "🦶", "👄", "🦷"
   ];
   
-  // قسم الإيموجيات المستخدمة مؤخراً
   if (emojiHistory.length > 0) {
     var recentSection = document.createElement("div");
     recentSection.className = "emoji-section";
@@ -892,7 +927,6 @@ function loadEmojis() {
     emojiPicker.appendChild(recentSection);
   }
   
-  // قسم الإيموجيات الشائعة
   var commonSection = document.createElement("div");
   commonSection.className = "emoji-section";
   commonSection.innerHTML = "<h4>إيموجيات شائعة</h4>";
@@ -908,7 +942,6 @@ function loadEmojis() {
   commonSection.appendChild(commonContainer);
   emojiPicker.appendChild(commonSection);
   
-  // قسم كل الإيموجيات (مجمعة حسب النوع)
   var emojiCategories = {
     "وجوه": ["😀", "😂", "🥰", "😎", "😜", "😢", "😠", "😍", "🤔", "😊", "🤗", "😇", "😘", "😋"],
     "إيماءات": ["👍", "👎", "👋", "🙏", "👏", "🤝", "💪", "👀", "🤞", "✌️"],
@@ -957,24 +990,18 @@ function insertEmoji(emoji) {
   input.focus();
   input.setSelectionRange(start + emoji.length, start + emoji.length);
   
-  // إضافة الإيموجي للسجل
   addToEmojiHistory(emoji);
 }
 
 // إضافة إيموجي للسجل
 function addToEmojiHistory(emoji) {
-  // إزالة الإيموجي إذا كانت موجودة مسبقاً
   emojiHistory = emojiHistory.filter(e => e !== emoji);
-  
-  // إضافة الإيموجي في البداية
   emojiHistory.unshift(emoji);
   
-  // الحفاظ على 20 إيموجي فقط
   if (emojiHistory.length > 20) {
     emojiHistory = emojiHistory.slice(0, 20);
   }
   
-  // حفظ في localStorage
   localStorage.setItem('emojiHistory', JSON.stringify(emojiHistory));
 }
 
@@ -1057,14 +1084,19 @@ function attachImage() {
   
   var input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'image/*,video/*,audio/*,application/*,.pdf,.doc,.docx,.txt';
+  input.accept = '*/*';
   input.multiple = false;
   
   input.onchange = function(e) {
     var file = e.target.files[0];
     if (!file) return;
     
-    // تحديد نوع الملف
+    // التحقق من حجم الملف (100MB كحد أقصى)
+    if (file.size > 100 * 1024 * 1024) {
+      showNotification("حجم الملف كبير جداً (100MB كحد أقصى)", "error");
+      return;
+    }
+    
     var mediaType = 'document';
     if (file.type.startsWith('image/')) {
       mediaType = 'image';
@@ -1074,22 +1106,20 @@ function attachImage() {
       mediaType = 'audio';
     }
     
-    // التحقق من حجم الملف (50MB كحد أقصى)
-    if (file.size > 50 * 1024 * 1024) {
-      showNotification("حجم الملف كبير جداً (50MB كحد أقصى)", "error");
-      return;
-    }
-    
     var formData = new FormData();
     formData.append('file', file);
     
+    showLoading(true);
     showNotification("جارٍ رفع الملف...", "info");
     
     fetch('/upload', {
       method: 'POST',
       body: formData
     })
-    .then(function(response) { return response.json(); })
+    .then(function(response) { 
+      showLoading(false);
+      return response.json(); 
+    })
     .then(function(result) {
       if (result.success) {
         socket.emit("send_media", {
@@ -1104,6 +1134,7 @@ function attachImage() {
       }
     })
     .catch(function(error) {
+      showLoading(false);
       console.error('فشل رفع الملف:', error);
       showNotification("فشل إرسال الملف", "error");
     });
@@ -1114,7 +1145,39 @@ function attachImage() {
 
 // عرض صورة
 function viewImage(src) {
-  window.open(src, '_blank');
+  var modal = document.createElement('div');
+  modal.className = 'image-viewer-modal';
+  modal.innerHTML = `
+    <div class="image-viewer-content">
+      <button class="close-image-btn" onclick="this.parentElement.parentElement.remove()">&times;</button>
+      <img src="${src}" alt="صورة" style="max-width: 90vw; max-height: 90vh;">
+      <div class="image-actions">
+        <a href="${src}" download class="download-image-btn">
+          <i class="fas fa-download"></i> تحميل
+        </a>
+      </div>
+    </div>
+  `;
+  modal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  `;
+  document.body.appendChild(modal);
+  
+  // إغلاق بالنقر خارج الصورة
+  modal.onclick = function(e) {
+    if (e.target === modal) {
+      modal.remove();
+    }
+  };
 }
 
 // التمرير لآخر رسالة
@@ -1179,11 +1242,34 @@ function logout() {
   }
 }
 
+// مسح الكاش
+function clearCache() {
+  fetch('/clear-cache', { method: 'POST' })
+    .then(response => response.json())
+    .then(result => {
+      if (result.success) {
+        showNotification("تم مسح الكاش بنجاح", "success");
+        // تحديث الصور
+        document.querySelectorAll('.avatar-img').forEach(img => {
+          if (img.style.backgroundImage) {
+            const currentSrc = img.style.backgroundImage;
+            img.style.backgroundImage = currentSrc.replace(/\?t=\d+/, '') + '?t=' + Date.now();
+          }
+        });
+      } else {
+        showNotification("فشل مسح الكاش", "error");
+      }
+    })
+    .catch(error => {
+      console.error('❌ خطأ في مسح الكاش:', error);
+      showNotification("فشل مسح الكاش", "error");
+    });
+}
+
 // عند تحميل الصفحة
 window.onload = function() {
   console.log("📱 التطبيق جاهز للهواتف القديمة والزرارية");
   
-  // إعداد حقل الإدخال
   var input = document.getElementById("message-input");
   if (input) {
     input.addEventListener('keypress', function(e) {
@@ -1199,13 +1285,28 @@ window.onload = function() {
     navigator.serviceWorker.register('/service-worker.js')
       .then(function(registration) {
         console.log('✅ Service Worker مسجل:', registration.scope);
+        
+        // التحقق من التحديثات
+        registration.addEventListener('updatefound', () => {
+          const newWorker = registration.installing;
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+              showNotification("توجد نسخة جديدة من التطبيق، يرجى تحديث الصفحة", "info");
+            }
+          });
+        });
       })
       .catch(function(error) {
         console.log('❌ فشل تسجيل Service Worker:', error);
       });
+    
+    // التحقق من التثبيت
+    if (navigator.serviceWorker.controller) {
+      console.log('✅ التطبيق يعمل في وضع عدم الاتصال');
+    }
   }
   
-  // إظهار زر التثبيت للتطبيق
+  // إظهار زر التثبيت
   let deferredPrompt;
   
   window.addEventListener('beforeinstallprompt', (e) => {
@@ -1214,52 +1315,125 @@ window.onload = function() {
     
     // إظهار زر التثبيت
     var installBtn = document.createElement('button');
-    installBtn.className = 'chats-icon-btn';
+    installBtn.className = 'chats-icon-btn install-app-btn';
     installBtn.title = 'تثبيت التطبيق';
     installBtn.innerHTML = '<i class="fas fa-download"></i>';
-    installBtn.onclick = function() {
-      deferredPrompt.prompt();
-      deferredPrompt.userChoice.then((choiceResult) => {
-        if (choiceResult.outcome === 'accepted') {
+    installBtn.onclick = async function() {
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') {
           console.log('✅ تم تثبيت التطبيق');
           showNotification("تم تثبيت التطبيق بنجاح", "success");
+          installBtn.style.display = 'none';
         }
         deferredPrompt = null;
-      });
+      }
     };
     
     var chatsActions = document.querySelector('.chats-actions');
     if (chatsActions) {
-      chatsActions.appendChild(installBtn);
+      // التحقق من عدم وجود الزر مسبقاً
+      if (!chatsActions.querySelector('.install-app-btn')) {
+        chatsActions.insertBefore(installBtn, chatsActions.firstChild);
+      }
     }
   });
   
-  // إضافة زر تسجيل الخروج
+  // إضافة أزرار الإجراءات
   var chatsActions = document.querySelector('.chats-actions');
   if (chatsActions) {
+    // زر تسجيل الخروج
     var logoutBtn = document.createElement('button');
-    logoutBtn.className = 'chats-icon-btn';
+    logoutBtn.className = 'chats-icon-btn logout-btn';
     logoutBtn.title = 'تسجيل الخروج';
     logoutBtn.innerHTML = '<i class="fas fa-sign-out-alt"></i>';
     logoutBtn.onclick = logout;
     chatsActions.appendChild(logoutBtn);
+    
+    // زر مسح الكاش
+    var cacheBtn = document.createElement('button');
+    cacheBtn.className = 'chats-icon-btn cache-btn';
+    cacheBtn.title = 'مسح الكاش';
+    cacheBtn.innerHTML = '<i class="fas fa-broom"></i>';
+    cacheBtn.onclick = clearCache;
+    chatsActions.appendChild(cacheBtn);
   }
   
   // إضافة زر الإيموجي
   var inputButtons = document.querySelector('.input-buttons');
   if (inputButtons) {
     var emojiBtn = document.createElement('button');
-    emojiBtn.className = 'input-btn';
+    emojiBtn.className = 'input-btn emoji-btn';
     emojiBtn.title = 'ايموجي';
     emojiBtn.innerHTML = '<i class="fas fa-smile"></i>';
     emojiBtn.onclick = showEmojiPicker;
-    inputButtons.appendChild(emojiBtn);
+    inputButtons.insertBefore(emojiBtn, inputButtons.firstChild);
+  }
+  
+  // إضافة زر المرفقات
+  if (inputButtons) {
+    var attachBtn = document.createElement('button');
+    attachBtn.className = 'input-btn attach-btn';
+    attachBtn.title = 'ملفات';
+    attachBtn.innerHTML = '<i class="fas fa-paperclip"></i>';
+    attachBtn.onclick = function() {
+      if (!currentChat || !currentSessionId) {
+        showNotification("اختر محادثة أولاً", "warning");
+        return;
+      }
+      
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '*/*';
+      input.multiple = true;
+      
+      input.onchange = function(e) {
+        var files = Array.from(e.target.files);
+        files.forEach(file => {
+          var reader = new FileReader();
+          reader.onload = function(event) {
+            var formData = new FormData();
+            formData.append('file', file);
+            
+            showNotification("جارٍ رفع الملف: " + file.name, "info");
+            
+            fetch('/upload', {
+              method: 'POST',
+              body: formData
+            })
+            .then(response => response.json())
+            .then(result => {
+              if (result.success) {
+                var mediaType = 'document';
+                if (file.type.startsWith('image/')) mediaType = 'image';
+                else if (file.type.startsWith('video/')) mediaType = 'video';
+                else if (file.type.startsWith('audio/')) mediaType = 'audio';
+                
+                socket.emit("send_media", {
+                  to: currentChat,
+                  filePath: result.filePath,
+                  mediaType: mediaType,
+                  caption: file.name
+                });
+                
+                showNotification("تم إرسال الملف: " + file.name, "success");
+              }
+            });
+          };
+          reader.readAsArrayBuffer(file);
+        });
+      };
+      
+      input.click();
+    };
+    inputButtons.appendChild(attachBtn);
   }
   
   // إغلاق منتقي الإيموجي عند النقر خارجها
   document.addEventListener('click', function(event) {
     var pickerContainer = document.getElementById("emoji-picker-container");
-    var emojiBtn = document.querySelector('.input-btn[title="ايموجي"]');
+    var emojiBtn = document.querySelector('.input-btn.emoji-btn');
     
     if (pickerContainer && pickerContainer.style.display === "block" &&
         !pickerContainer.contains(event.target) && 
@@ -1271,4 +1445,19 @@ window.onload = function() {
   
   // إظهار شاشة الانتظار
   showScreen("login");
+  
+  // التحقق مما إذا كان المتصفح يدعم PWA
+  if (window.matchMedia('(display-mode: standalone)').matches) {
+    console.log('✅ التطبيق يعمل في وضع standalone');
+    document.body.classList.add('standalone');
+  }
+  
+  // التحقق من وضع عدم الاتصال
+  window.addEventListener('online', () => {
+    showNotification("تم استعادة الاتصال بالإنترنت", "success");
+  });
+  
+  window.addEventListener('offline', () => {
+    showNotification("تم فقدان الاتصال بالإنترنت", "error");
+  });
 };
