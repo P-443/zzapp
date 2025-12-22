@@ -1,4 +1,78 @@
 
+/* تصحيح اتجاه الأرقام */
+.ltr-number {
+    direction: ltr;
+    unicode-bidi: isolate;
+    text-align: left;
+    display: inline-block;
+}
+
+/* الأرقام في المحادثات */
+.chat-number {
+    direction: ltr;
+    unicode-bidi: isolate;
+    display: block;
+    font-family: monospace;
+    text-align: left;
+}
+
+/* أرقام في الرسائل */
+.message-number {
+    direction: ltr;
+    unicode-bidi: isolate;
+    font-family: monospace;
+}
+
+/* حقل إدخال الرقم */
+input[type="tel"], 
+input[type="number"],
+#new-chat-number {
+    direction: ltr;
+    text-align: left;
+    font-family: monospace;
+    unicode-bidi: isolate;
+}
+
+/* تصحيح اتجاه الأرقام في كل مكان */
+[dir="rtl"] .ltr-number,
+[dir="rtl"] .chat-number,
+[dir="rtl"] .message-number {
+    direction: ltr;
+    text-align: left;
+    unicode-bidi: isolate;
+}
+
+/* أرقام الوقت */
+.message-time,
+.chat-time {
+    font-family: monospace;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+
+/* تحسين عرض الأرقام على الهواتف القديمة */
+@media (max-width: 480px) {
+    .chat-number,
+    .message-number,
+    .message-time,
+    .chat-time {
+        font-size: 12px;
+    }
+}
+
+/* تحسين حقل إدخال الرقم */
+#new-chat-number {
+    padding: 12px;
+    font-size: 16px;
+    letter-spacing: 1px;
+}
+
+/* مؤقت التسجيل */
+.recording-timer {
+    font-family: monospace;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
 /* إضافة هذه الأنماط لزر المزامنة */
 .sync-chats-btn {
   background: rgba(255, 255, 255, 0.1);
