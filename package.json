@@ -1,6 +1,6 @@
 {
   "name": "zzapp",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
@@ -8,6 +8,7 @@
     "build": "echo 'No build step required'",
     "test": "echo 'No tests specified'",
     "fix-db": "node fix-database.js",
+    "fix-numbers": "node fix-phone-numbers.js",
     "sync-chats": "curl -X POST http://localhost:3000/sync-chats/session_id"
   },
   "dependencies": {
