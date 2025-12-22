@@ -107,6 +107,9 @@ async function setupDatabase() {
         is_group BOOLEAN DEFAULT false,
         is_pinned BOOLEAN DEFAULT false,
         session_id TEXT,
+        chat_type TEXT DEFAULT 'regular',
+        is_duplicate BOOLEAN DEFAULT false,
+        original_id TEXT,
         PRIMARY KEY (id, session_id)
       )
     `);
@@ -139,6 +142,8 @@ async function setupDatabase() {
       CREATE INDEX IF NOT EXISTS idx_messages_chat_session ON zzapp_messages(chat_id, session_id);
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON zzapp_messages(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_chats_id ON zzapp_chats(id);
+      CREATE INDEX IF NOT EXISTS idx_chats_number ON zzapp_chats(number);
+      CREATE INDEX IF NOT EXISTS idx_chats_duplicate ON zzapp_chats(is_duplicate);
     `);
 
     client.release();
@@ -177,6 +182,25 @@ let whatsappInitializing = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
+// دالة لتنظيف الرقم
+function cleanPhoneNumber(phoneNumber) {
+  if (!phoneNumber) return '';
+  
+  let cleanNumber = phoneNumber.toString().replace(/\D/g, '');
+  
+  // إذا كان الرقم يبدأ بـ 0، نزيله
+  if (cleanNumber.startsWith('0')) {
+    cleanNumber = cleanNumber.substring(1);
+  }
+  
+  // إذا كان الرقم 10 أرقام ولا يبدأ بـ 2، نضيف 2 للمصرية
+  if (cleanNumber.length === 10 && !cleanNumber.startsWith('2')) {
+    cleanNumber = '2' + cleanNumber;
+  }
+  
+  return cleanNumber;
+}
+
 // دالة لاستخراج الرقم من ID
 function extractNumberFromId(contactId) {
   if (!contactId) return "جهة اتصال";
@@ -188,7 +212,7 @@ function extractNumberFromId(contactId) {
   if (contactId.includes('@lid')) {
     const parts = contactId.split('@');
     if (parts[0]) {
-      return parts[0];
+      return cleanPhoneNumber(parts[0]);
     }
     return "جهة اتصال";
   }
@@ -200,7 +224,7 @@ function extractNumberFromId(contactId) {
     .replace('@s.whatsapp.net', '')
     .replace('+', '');
   
-  return number || "جهة اتصال";
+  return cleanPhoneNumber(number) || "جهة اتصال";
 }
 
 // دالة لتنظيف الاسم
@@ -474,7 +498,9 @@ async function restoreSession() {
 async function loadAllChats(sessionId) {
   try {
     const chatsRes = await pool.query(
-      "SELECT DISTINCT ON (id) * FROM zzapp_chats WHERE session_id = $1 ORDER BY id, updated_at DESC",
+      `SELECT DISTINCT ON (id) * FROM zzapp_chats 
+       WHERE session_id = $1 AND is_duplicate = false
+       ORDER BY id, updated_at DESC`,
       [sessionId]
     );
     return chatsRes.rows;
@@ -530,8 +556,8 @@ async function syncAllChats(sessionId) {
           `INSERT INTO zzapp_chats (
             id, name, display_name, number, about, pic, pic_cached, 
             last_message, message_count, unread_count, last_time, updated_at, 
-            is_group, is_pinned, session_id
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            is_group, is_pinned, session_id, chat_type, is_duplicate
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
           ON CONFLICT (id, session_id) 
           DO UPDATE SET 
             name = EXCLUDED.name,
@@ -545,7 +571,9 @@ async function syncAllChats(sessionId) {
             last_time = EXCLUDED.last_time,
             updated_at = EXCLUDED.updated_at,
             is_group = EXCLUDED.is_group,
-            is_pinned = EXCLUDED.is_pinned`,
+            is_pinned = EXCLUDED.is_pinned,
+            chat_type = EXCLUDED.chat_type,
+            is_duplicate = EXCLUDED.is_duplicate`,
           [
             chat.id._serialized,
             contactInfo.name,
@@ -561,7 +589,9 @@ async function syncAllChats(sessionId) {
             new Date(),
             chat.isGroup || false,
             chat.pinned || false,
-            sessionId
+            sessionId,
+            'regular',
+            false
           ]
         );
         
@@ -574,6 +604,196 @@ async function syncAllChats(sessionId) {
     
   } catch (error) {
     console.error("❌ خطأ في مزامنة المحادثات:", error.message);
+  }
+}
+
+// دالة للتحقق من وجود محادثة مكررة
+async function checkDuplicateChat(phoneNumber, sessionId) {
+  try {
+    const cleanNumber = cleanPhoneNumber(phoneNumber);
+    
+    const result = await pool.query(
+      `SELECT * FROM zzapp_chats 
+       WHERE session_id = $1 
+       AND (number = $2 OR number LIKE $3)
+       AND is_duplicate = false
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [sessionId, cleanNumber, `%${cleanNumber}%`]
+    );
+    
+    return result.rows[0] || null;
+  } catch (error) {
+    console.log("⚠️ خطأ في التحقق من المحادثات المكررة:", error.message);
+    return null;
+  }
+}
+
+// دالة لبدء محادثة جديدة مع أي رقم - الإصدار المحسن
+async function startNewChatWithPhone(phoneNumber, sessionId) {
+  try {
+    if (!client || !isReady) {
+      throw new Error("واتساب غير متصل");
+    }
+    
+    let cleanNumber = cleanPhoneNumber(phoneNumber);
+    
+    if (!cleanNumber || cleanNumber.length < 10) {
+      throw new Error("رقم الهاتف غير صالح");
+    }
+    
+    console.log(`📞 محاولة بدء محادثة مع الرقم: ${cleanNumber}`);
+    
+    let chatId = null;
+    let contact = null;
+    
+    // المحاولة الأولى: البحث في جهات الاتصال
+    try {
+      // البحث باستخدام getNumberId للحصول على المعرف الصحيح
+      const numberId = await client.getNumberId(cleanNumber);
+      if (numberId) {
+        chatId = numberId._serialized;
+        console.log(`✅ تم العثور على المعرف باستخدام getNumberId: ${chatId}`);
+      }
+    } catch (e) {
+      console.log("⚠️ لا يمكن العثور على المعرف باستخدام getNumberId:", e.message);
+    }
+    
+    // المحاولة الثانية: استخدام المعرف القياسي
+    if (!chatId) {
+      chatId = `${cleanNumber}@c.us`;
+      console.log(`⚠️ استخدام المعرف القياسي: ${chatId}`);
+    }
+    
+    // المحاولة الثالثة: استخدام + قبل الرقم للدول الأخرى
+    if (!chatId && !cleanNumber.startsWith('+')) {
+      try {
+        const numberId = await client.getNumberId(`+${cleanNumber}`);
+        if (numberId) {
+          chatId = numberId._serialized;
+          console.log(`✅ تم العثور على المعرف باستخدام +: ${chatId}`);
+        }
+      } catch (e) {
+        console.log("⚠️ لا يمكن العثور على المعرف باستخدام +:", e.message);
+      }
+    }
+    
+    if (!chatId) {
+      throw new Error("لا يمكن العثور على المعرف الصحيح للرقم");
+    }
+    
+    // التحقق مما إذا كانت المحادثة موجودة بالفعل
+    const existingChat = await checkDuplicateChat(cleanNumber, sessionId);
+    if (existingChat) {
+      console.log(`📱 المحادثة موجودة بالفعل: ${existingChat.id}`);
+      return existingChat;
+    }
+    
+    // محاولة إرسال رسالة ترحيب
+    try {
+      const message = await client.sendMessage(chatId, "مرحباً 👋");
+      console.log("✅ تم إرسال رسالة الترحيب بنجاح");
+    } catch (sendError) {
+      console.log("⚠️ لا يمكن إرسال رسالة ترحيب:", sendError.message);
+      
+      // إذا كان الخطأ بسبب LID، نحاول مرة أخرى بالبحث في جهات الاتصال
+      if (sendError.message.includes('No LID for user')) {
+        try {
+          // محاولة استخدام isRegisteredUser للتحقق من وجود المستخدم
+          const isRegistered = await client.isRegisteredUser(chatId);
+          if (!isRegistered) {
+            throw new Error("الرقم غير مسجل في واتساب");
+          }
+          
+          // محاولة إرسال رسالة بدون ترحيب
+          const contact = await client.getContactById(chatId);
+          if (contact) {
+            console.log("✅ تم العثور على جهة الاتصال");
+          }
+        } catch (regError) {
+          console.log("⚠️ خطأ في التحقق من تسجيل المستخدم:", regError.message);
+          // نستمر في إنشاء المحادثة حتى لو فشل الإرسال
+        }
+      }
+    }
+    
+    // الحصول على معلومات جهة الاتصال
+    const contactInfo = await getContactInfo(chatId, sessionId);
+    
+    let chatData;
+    
+    try {
+      // التحقق من عدم وجود المحادثة مسبقاً باستخدام chatId
+      const existing = await pool.query(
+        "SELECT * FROM zzapp_chats WHERE id = $1 AND session_id = $2",
+        [chatId, sessionId]
+      );
+      
+      if (existing.rows.length > 0) {
+        chatData = existing.rows[0];
+        console.log(`📱 تم العثور على المحادثة الحالية: ${chatId}`);
+      } else {
+        // حفظ المحادثة الجديدة
+        await pool.query(
+          `INSERT INTO zzapp_chats (
+            id, name, display_name, number, about, pic, pic_cached, 
+            last_message, last_time, updated_at, is_group, session_id, chat_type
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, $11)
+          ON CONFLICT (id, session_id) 
+          DO UPDATE SET 
+            name = COALESCE($2, zzapp_chats.name),
+            display_name = COALESCE($3, zzapp_chats.display_name),
+            about = COALESCE($5, zzapp_chats.about),
+            pic = COALESCE($6, zzapp_chats.pic),
+            pic_cached = COALESCE($7, zzapp_chats.pic_cached),
+            last_message = $8,
+            last_time = NOW(),
+            updated_at = NOW()`,
+          [
+            chatId,
+            contactInfo.name,
+            contactInfo.display_name,
+            cleanNumber,
+            contactInfo.about,
+            contactInfo.pic,
+            contactInfo.pic_cached,
+            "ابدأ المحادثة",
+            false,
+            sessionId,
+            'new_chat'
+          ]
+        );
+        
+        const result = await pool.query(
+          "SELECT * FROM zzapp_chats WHERE id = $1 AND session_id = $2",
+          [chatId, sessionId]
+        );
+        chatData = result.rows[0];
+        
+        console.log(`✅ تم إنشاء محادثة جديدة: ${chatId}`);
+      }
+    } catch (dbError) {
+      console.log("⚠️ خطأ في قاعدة البيانات:", dbError.message);
+      chatData = {
+        id: chatId,
+        name: contactInfo.name,
+        display_name: contactInfo.display_name,
+        number: cleanNumber,
+        about: contactInfo.about,
+        pic: contactInfo.pic,
+        pic_cached: contactInfo.pic_cached,
+        last_message: "ابدأ المحادثة",
+        last_time: new Date().toISOString(),
+        session_id: sessionId,
+        chat_type: 'new_chat'
+      };
+    }
+    
+    return chatData;
+    
+  } catch (error) {
+    console.error("❌ خطأ في بدء محادثة جديدة:", error.message);
+    throw error;
   }
 }
 
@@ -816,9 +1036,9 @@ async function initWhatsApp(sessionId = null) {
         try {
           await pool.query(
             `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, 
-              updated_at, is_group, session_id, message_count, unread_count)
+              updated_at, is_group, session_id, message_count, unread_count, is_duplicate)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10, 1, 
-                    CASE WHEN $11 = true THEN 0 ELSE 1 END)
+                    CASE WHEN $11 = true THEN 0 ELSE 1 END, $12)
              ON CONFLICT (id, session_id) 
              DO UPDATE SET 
                name = COALESCE($2, zzapp_chats.name),
@@ -831,7 +1051,8 @@ async function initWhatsApp(sessionId = null) {
                updated_at = NOW(),
                message_count = zzapp_chats.message_count + 1,
                unread_count = CASE WHEN $11 = true THEN zzapp_chats.unread_count 
-                                 ELSE zzapp_chats.unread_count + 1 END`,
+                                 ELSE zzapp_chats.unread_count + 1 END,
+               is_duplicate = $12`,
             [chatId, 
              contactInfo.name,
              contactInfo.display_name,
@@ -842,7 +1063,8 @@ async function initWhatsApp(sessionId = null) {
              msg.body || "[وسائط]",
              isGroup,
              currentSessionId,
-             msg.fromMe]
+             msg.fromMe,
+             false]
           );
         } catch (dbError) {
           console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
@@ -1041,21 +1263,19 @@ io.on("connection", async (socket) => {
     try {
       const chatId = data.to.includes('@') ? data.to : `${data.to}@c.us`;
       
-      // محاولة إرسال الرسالة
       try {
         const message = await client.sendMessage(chatId, data.text);
       } catch (sendError) {
         console.log("⚠️ خطأ في إرسال الرسالة:", sendError.message);
         
-        // إذا كان الخطأ بسبب LID، نحاول البحث عن المستخدم أولاً
+        // إذا كان الخطأ بسبب LID، نحاول استخدام getNumberId
         if (sendError.message.includes('No LID for user')) {
           try {
-            // البحث عن معرف LID للمستخدم
-            const contact = await client.getContactById(chatId);
-            if (contact) {
-              const lidId = contact.id._serialized;
-              await client.sendMessage(lidId, data.text);
-              console.log("✅ تم الإرسال باستخدام LID");
+            const number = chatId.replace('@c.us', '');
+            const numberId = await client.getNumberId(number);
+            if (numberId) {
+              await client.sendMessage(numberId._serialized, data.text);
+              console.log("✅ تم الإرسال باستخدام getNumberId");
             } else {
               throw sendError;
             }
@@ -1089,8 +1309,8 @@ io.on("connection", async (socket) => {
 
       try {
         await pool.query(
-          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id, is_duplicate)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10)
            ON CONFLICT (id, session_id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
@@ -1101,7 +1321,8 @@ io.on("connection", async (socket) => {
              last_message = $8,
              last_time = NOW(),
              updated_at = NOW(),
-             message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+             message_count = COALESCE(zzapp_chats.message_count, 0) + 1,
+             is_duplicate = $10`,
           [chatId, 
            contactInfo.name,
            contactInfo.display_name,
@@ -1110,7 +1331,8 @@ io.on("connection", async (socket) => {
            contactInfo.pic,
            contactInfo.pic_cached,
            data.text,
-           currentSessionId]
+           currentSessionId,
+           false]
         );
       } catch (dbError) {
         console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
@@ -1261,14 +1483,13 @@ io.on("connection", async (socket) => {
       } catch (sendError) {
         console.log("⚠️ خطأ في إرسال الوسائط:", sendError.message);
         
-        // إذا كان الخطأ بسبب LID، نحاول البحث عن المستخدم أولاً
         if (sendError.message.includes('No LID for user')) {
           try {
-            const contact = await client.getContactById(chatId);
-            if (contact) {
-              const lidId = contact.id._serialized;
-              await client.sendMessage(lidId, media, options);
-              console.log("✅ تم إرسال الوسائط باستخدام LID");
+            const number = chatId.replace('@c.us', '');
+            const numberId = await client.getNumberId(number);
+            if (numberId) {
+              await client.sendMessage(numberId._serialized, media, options);
+              console.log("✅ تم إرسال الوسائط باستخدام getNumberId");
             } else {
               throw sendError;
             }
@@ -1310,8 +1531,8 @@ io.on("connection", async (socket) => {
 
       try {
         await pool.query(
-          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9)
+          `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, last_message, last_time, updated_at, session_id, is_duplicate)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10)
            ON CONFLICT (id, session_id) 
            DO UPDATE SET 
              name = COALESCE($2, zzapp_chats.name),
@@ -1322,7 +1543,8 @@ io.on("connection", async (socket) => {
              last_message = $8,
              last_time = NOW(),
              updated_at = NOW(),
-             message_count = COALESCE(zzapp_chats.message_count, 0) + 1`,
+             message_count = COALESCE(zzapp_chats.message_count, 0) + 1,
+             is_duplicate = $10`,
           [chatId, 
            contactInfo.name,
            contactInfo.display_name,
@@ -1331,7 +1553,8 @@ io.on("connection", async (socket) => {
            contactInfo.pic,
            contactInfo.pic_cached,
            data.caption || "[وسائط]",
-           currentSessionId]
+           currentSessionId,
+           false]
         );
       } catch (dbError) {
         console.log("⚠️ خطأ في تحديث المحادثة:", dbError.message);
@@ -1393,7 +1616,7 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // بدء محادثة جديدة - الإصدار المحسّن
+  // بدء محادثة جديدة - الإصدار المحسن
   socket.on("start_new_chat", async (phoneNumber) => {
     if (!isReady) {
       socket.emit("error", "واتساب غير متصل");
@@ -1401,94 +1624,14 @@ io.on("connection", async (socket) => {
     }
 
     try {
-      let cleanNumber = phoneNumber.trim().replace(/\D/g, '');
+      console.log(`📞 طلب بدء محادثة جديدة مع الرقم: ${phoneNumber}`);
       
-      if (!cleanNumber || cleanNumber.length < 10) {
-        socket.emit("error", "رقم الهاتف غير صالح");
-        return;
-      }
+      const chatData = await startNewChatWithPhone(phoneNumber, currentSessionId);
       
-      // إضافة رمز الدولة إذا لم يكن موجوداً
-      if (cleanNumber.length === 10 && !cleanNumber.startsWith('2')) {
-        cleanNumber = '2' + cleanNumber;
-      }
-      
-      let chatId = `${cleanNumber}@c.us`;
-      
-      // التحقق مما إذا كان المستخدم موجوداً في جهات الاتصال
-      try {
-        const contact = await client.getContactById(chatId);
-        if (contact) {
-          // إذا كان المستخدم لديه LID، استخدمه
-          if (contact.id._serialized.includes('@lid')) {
-            chatId = contact.id._serialized;
-            console.log("✅ استخدام LID للمستخدم:", chatId);
-          }
-        }
-      } catch (e) {
-        console.log("⚠️ المستخدم ليس في جهات الاتصال، سيتم استخدام المعرف القياسي");
-      }
-      
-      // محاولة إرسال رسالة ترحيب
-      try {
-        await client.sendMessage(chatId, "مرحباً 👋");
-      } catch (e) {
-        console.log("⚠️ لا يمكن إرسال رسالة إلى هذا الرقم:", e.message);
-        // استمر في إنشاء المحادثة حتى لو فشل الإرسال
-      }
-      
-      const contactInfo = await getContactInfo(chatId, currentSessionId);
-      
-      let chatData;
-      
-      try {
-        // التحقق من عدم وجود المحادثة مسبقاً
-        const existing = await pool.query(
-          "SELECT * FROM zzapp_chats WHERE id = $1 AND session_id = $2",
-          [chatId, currentSessionId]
-        );
-        
-        if (existing.rows.length > 0) {
-          chatData = existing.rows[0];
-        } else {
-          await pool.query(
-            `INSERT INTO zzapp_chats (id, name, display_name, number, about, pic, pic_cached, updated_at, session_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
-             ON CONFLICT (id, session_id) DO NOTHING`,
-            [chatId, 
-             contactInfo.name,
-             contactInfo.display_name,
-             cleanNumber, 
-             contactInfo.about, 
-             contactInfo.pic,
-             contactInfo.pic_cached,
-             currentSessionId]
-          );
-          
-          const result = await pool.query(
-            "SELECT * FROM zzapp_chats WHERE id = $1 AND session_id = $2",
-            [chatId, currentSessionId]
-          );
-          chatData = result.rows[0];
-        }
-      } catch (dbError) {
-        console.log("⚠️ خطأ في قاعدة البيانات:", dbError.message);
-        chatData = {
-          id: chatId,
-          name: contactInfo.name,
-          display_name: contactInfo.display_name,
-          number: cleanNumber,
-          about: contactInfo.about,
-          pic: contactInfo.pic,
-          pic_cached: contactInfo.pic_cached,
-          last_message: "ابدأ المحادثة",
-          last_time: new Date().toISOString(),
-          session_id: currentSessionId
-        };
-      }
-
       socket.emit("new_chat_started", chatData);
       io.emit("chat_update", chatData);
+      
+      showNotification("تم بدء محادثة جديدة بنجاح", "success");
 
     } catch (error) {
       console.log("❌ خطأ في بدء محادثة جديدة:", error.message);
@@ -1692,6 +1835,31 @@ app.post("/sync-chats/:sessionId", async (req, res) => {
   }
 });
 
+// روت لبدء محادثة جديدة عبر HTTP
+app.post("/start-chat/:sessionId", express.json(), async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+    
+    if (!phoneNumber) {
+      return res.status(400).json({ success: false, error: "يرجى إدخال رقم الهاتف" });
+    }
+    
+    if (!isReady) {
+      return res.status(400).json({ success: false, error: "واتساب غير متصل" });
+    }
+    
+    const chatData = await startNewChatWithPhone(phoneNumber, req.params.sessionId);
+    
+    res.json({ 
+      success: true, 
+      message: "تم بدء المحادثة بنجاح",
+      chat: chatData
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ملف manifest للتطبيق
 app.get("/manifest.json", (req, res) => {
   res.json({
@@ -1734,7 +1902,7 @@ app.get("/service-worker.js", (req, res) => {
   const sw = `
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open('zzapp-cache-v10').then(cache => {
+    caches.open('zzapp-cache-v11').then(cache => {
       return cache.addAll([
         '/',
         '/index.html',
@@ -1754,7 +1922,7 @@ self.addEventListener('activate', event => {
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheName !== 'zzapp-cache-v10') {
+          if (cacheName !== 'zzapp-cache-v11') {
             return caches.delete(cacheName);
           }
         })
@@ -1786,7 +1954,7 @@ self.addEventListener('fetch', event => {
           return response;
         }
         const responseToCache = response.clone();
-        caches.open('zzapp-cache-v10').then(cache => {
+        caches.open('zzapp-cache-v11').then(cache => {
           cache.put(event.request, responseToCache);
         });
         return response;
