@@ -1,6 +1,6 @@
 {
   "name": "zzapp",
-  "version": "2.8.1",
+  "version": "2.9.0",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,10 @@
     "test": "echo 'No tests specified'",
     "fix-db": "node fix-database.js",
     "fix-numbers": "node fix-phone-numbers.js",
-    "sync-chats": "curl -X POST http://localhost:3000/sync-chats/session_id"
+    "fix-duplicates": "node fix-duplicate-chats.js",
+    "clean-all": "npm run fix-db && npm run fix-numbers && npm run fix-duplicates",
+    "sync-chats": "curl -X POST http://localhost:3000/sync-chats/session_id",
+    "start-chat": "curl -X POST http://localhost:3000/start-chat/session_id -H 'Content-Type: application/json' -d '{\"phoneNumber\": \"20123456789\"}'"
   },
   "dependencies": {
     "express": "^4.18.2",
