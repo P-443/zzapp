@@ -59,6 +59,9 @@ socket.on("ready", function(data) {
   
   loadChats();
   showNotification("تم الاتصال بواتساب", "success");
+  
+  // إضافة زر مزامنة المحادثات
+  addSyncButton();
 });
 
 socket.on("session_restored", function(data) {
@@ -67,6 +70,9 @@ socket.on("session_restored", function(data) {
   showScreen("chats");
   loadChats();
   showNotification("تم استعادة الجلسة السابقة", "info");
+  
+  // إضافة زر مزامنة المحادثات
+  addSyncButton();
 });
 
 socket.on("user_info", function(user) {
@@ -155,6 +161,41 @@ socket.on("logged_out", function() {
   }, 2000);
 });
 
+socket.on("sync_complete", function(data) {
+  showNotification(data.message, "success");
+  loadChats();
+});
+
+// إضافة زر مزامنة المحادثات
+function addSyncButton() {
+  var chatsActions = document.querySelector('.chats-actions');
+  if (chatsActions) {
+    // التحقق من عدم وجود الزر مسبقاً
+    if (!chatsActions.querySelector('.sync-chats-btn')) {
+      var syncBtn = document.createElement('button');
+      syncBtn.className = 'chats-icon-btn sync-chats-btn';
+      syncBtn.title = 'مزامنة المحادثات';
+      syncBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
+      syncBtn.onclick = function() {
+        if (currentSessionId) {
+          socket.emit("sync_chats");
+          showNotification("جارٍ مزامنة المحادثات من واتساب...", "info");
+        } else {
+          showNotification("يرجى تسجيل الدخول أولاً", "warning");
+        }
+      };
+      
+      // إضافة الزر بجانب زر تحديث المحادثات
+      var refreshBtn = chatsActions.querySelector('.chats-icon-btn[onclick="refreshChats()"]');
+      if (refreshBtn) {
+        chatsActions.insertBefore(syncBtn, refreshBtn.nextSibling);
+      } else {
+        chatsActions.appendChild(syncBtn);
+      }
+    }
+  }
+}
+
 // التحقق من وجود الرسالة
 function isMessageExists(messageId) {
   const container = document.getElementById("messages-container");
@@ -181,7 +222,6 @@ function updateAvatar(element, picUrl, name) {
   if (!element) return;
   
   if (picUrl) {
-    // إضافة طابع زمني لمنع التخزين المؤقت
     const timestamp = Date.now();
     const urlWithTimestamp = picUrl.includes('?') ? 
       `${picUrl}&t=${timestamp}` : `${picUrl}?t=${timestamp}`;
@@ -206,7 +246,6 @@ function showScreen(screenName) {
   
   hideEmojiPicker();
   
-  // عند العودة للمحادثات، تحديث العرض
   if (screenName === "chats") {
     setTimeout(refreshChats, 100);
   }
@@ -260,24 +299,22 @@ function showChats(chats) {
         <i class="fas fa-comments"></i>
         <p>لا توجد محادثات</p>
         <p class="small">ابدأ محادثة جديدة بالنقر على الزر +</p>
+        <button onclick="syncChatsFromWhatsApp()" class="retry-btn">مزامنة من واتساب</button>
       </div>
     `;
     return;
   }
   
-  // حفظ في الكاش
   chats.forEach(chat => {
     chatsCache[chat.id] = chat;
   });
   
-  // ترتيب المحادثات حسب الوقت
   chats.sort(function(a, b) {
     var timeA = a.last_time || a.updated_at || new Date(0);
     var timeB = b.last_time || b.updated_at || new Date(0);
     return new Date(timeB) - new Date(timeA);
   });
   
-  // تحديث القائمة
   container.innerHTML = "";
   chats.forEach(function(chat) {
     addChatItem(chat);
@@ -332,7 +369,6 @@ function addChatItem(chat) {
   
   container.appendChild(div);
   
-  // تحديث الصورة إذا كانت موجودة
   if (chat.pic) {
     setTimeout(() => {
       var avatar = document.getElementById(`chat-avatar-${chat.id.replace(/[@\.]/g, '-')}`);
@@ -355,6 +391,16 @@ function updateChatInList(chat) {
   addChatItem(chat);
 }
 
+// إضافة محادثة جديدة للقائمة
+function addChatToList(chat) {
+  var container = document.getElementById("chats-list");
+  var existing = container.querySelector(`.chat-item[data-id="${chat.id}"][data-session="${chat.session_id}"]`);
+  
+  if (!existing) {
+    addChatItem(chat);
+  }
+}
+
 // تحديث معاينة المحادثة
 function updateChatPreview(chatId, lastMessage, timestamp) {
   var chatItem = document.querySelector(`.chat-item[data-id="${chatId}"][data-session="${currentSessionId}"]`);
@@ -374,7 +420,6 @@ function updateChatPreview(chatId, lastMessage, timestamp) {
       timeEl.textContent = formatTime(timestamp);
     }
     
-    // نقل المحادثة إلى الأعلى
     var container = chatItem.parentNode;
     if (container.firstChild !== chatItem) {
       container.insertBefore(chatItem, container.firstChild);
@@ -616,7 +661,6 @@ function showMessage(data, isSelf) {
   div.innerHTML = content;
   container.appendChild(div);
   
-  // إضافة تأثير ظهور
   div.style.opacity = '0';
   div.style.transform = 'translateY(10px)';
   setTimeout(() => {
@@ -656,7 +700,6 @@ function sendVoiceMessage(filePath) {
   
   console.log("🎤 إرسال رسالة صوتية:", filePath);
   
-  // إرسال كرسالة صوتية (PTT)
   socket.emit("send_media", {
     to: currentChat,
     filePath: filePath,
@@ -668,7 +711,7 @@ function sendVoiceMessage(filePath) {
   showNotification("جارٍ إرسال الرسالة الصوتية...", "info");
 }
 
-// بدء تسجيل صوتي - محسّن
+// بدء تسجيل صوتي
 function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showNotification("المتصفح لا يدعم التسجيل الصوتي", "error");
@@ -683,7 +726,7 @@ function startRecording() {
   navigator.mediaDevices.getUserMedia({ 
     audio: {
       channelCount: 1,
-      sampleRate: 48000, // 48kHz لتحسين الجودة
+      sampleRate: 48000,
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true
@@ -693,7 +736,6 @@ function startRecording() {
     isRecording = true;
     audioChunks = [];
     
-    // استخدم webm لأنه مدعوم من معظم المتصفحات
     const mimeTypes = [
       'audio/webm;codecs=opus',
       'audio/webm',
@@ -747,7 +789,6 @@ function startRecording() {
         .then(response => response.json())
         .then(result => {
           if (result.success) {
-            // إرسال كرسالة صوتية (التحويل سيتم في السيرفر)
             socket.emit("send_media", {
               to: currentChat,
               filePath: result.filePath,
@@ -1050,6 +1091,16 @@ function createNewChat() {
   showNotification("جارٍ بدء المحادثة...", "info");
 }
 
+// مزامنة المحادثات من واتساب
+function syncChatsFromWhatsApp() {
+  if (currentSessionId) {
+    socket.emit("sync_chats");
+    showNotification("جارٍ مزامنة المحادثات من واتساب...", "info");
+  } else {
+    showNotification("يرجى تسجيل الدخول أولاً", "warning");
+  }
+}
+
 // التحقق من إدخال الأرقام فقط
 function isNumberKey(evt) {
   var charCode = (evt.which) ? evt.which : evt.keyCode;
@@ -1097,7 +1148,6 @@ function attachImage() {
     var file = e.target.files[0];
     if (!file) return;
     
-    // التحقق من حجم الملف (100MB كحد أقصى)
     if (file.size > 100 * 1024 * 1024) {
       showNotification("حجم الملف كبير جداً (100MB كحد أقصى)", "error");
       return;
@@ -1112,11 +1162,9 @@ function attachImage() {
       mediaType = 'video';
     } else if (file.type.startsWith('audio/')) {
       mediaType = 'audio';
-      // إذا كان اسم الملف يحتوي على "voice" فهو رسالة صوتية
       isVoiceMessage = file.name.toLowerCase().includes('voice');
     }
     
-    // إذا كان امتداد الملف .3gp وكان صورة، سيتم تحويله تلقائياً في السيرفر
     var fileExt = file.name.toLowerCase().split('.').pop();
     if (fileExt === '3gp' && mediaType === 'image') {
       showNotification("جارٍ تحويل صورة 3gp إلى JPG...", "info");
@@ -1189,7 +1237,6 @@ function viewImage(src) {
   `;
   document.body.appendChild(modal);
   
-  // إغلاق بالنقر خارج الصورة
   modal.onclick = function(e) {
     if (e.target === modal) {
       modal.remove();
@@ -1288,13 +1335,12 @@ window.onload = function() {
     });
   }
   
-  // تسجيل Service Worker للتطبيق
+  // تسجيل Service Worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/service-worker.js')
       .then(function(registration) {
         console.log('✅ Service Worker مسجل:', registration.scope);
         
-        // التحقق من التحديثات
         registration.addEventListener('updatefound', () => {
           const newWorker = registration.installing;
           newWorker.addEventListener('statechange', () => {
@@ -1308,7 +1354,6 @@ window.onload = function() {
         console.log('❌ فشل تسجيل Service Worker:', error);
       });
     
-    // التحقق من التثبيت
     if (navigator.serviceWorker.controller) {
       console.log('✅ التطبيق يعمل في وضع عدم الاتصال');
     }
@@ -1321,7 +1366,6 @@ window.onload = function() {
     e.preventDefault();
     deferredPrompt = e;
     
-    // إظهار زر التثبيت
     var installBtn = document.createElement('button');
     installBtn.className = 'chats-icon-btn install-app-btn';
     installBtn.title = 'تثبيت التطبيق';
@@ -1341,14 +1385,13 @@ window.onload = function() {
     
     var chatsActions = document.querySelector('.chats-actions');
     if (chatsActions) {
-      // التحقق من عدم وجود الزر مسبقاً
       if (!chatsActions.querySelector('.install-app-btn')) {
         chatsActions.insertBefore(installBtn, chatsActions.firstChild);
       }
     }
   });
   
-  // إضافة أزرار الإجراءات (فقط تسجيل الخروج)
+  // إضافة أزرار الإجراءات
   var chatsActions = document.querySelector('.chats-actions');
   if (chatsActions) {
     // زر تسجيل الخروج
@@ -1461,7 +1504,6 @@ window.onload = function() {
   // التحقق من وضع عدم الاتصال
   window.addEventListener('online', () => {
     showNotification("تم استعادة الاتصال بالإنترنت", "success");
-    // محاولة إعادة الاتصال بالسيرفر
     setTimeout(() => {
       if (!socket.connected) {
         socket.connect();
