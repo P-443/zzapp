@@ -1556,3 +1556,74 @@ window.onload = function() {
     console.error('⚠️ خطأ غير متوقع:', e.message, e.filename, e.lineno);
   });
 };
+
+// إضافة دالة لمعالجة الدول المختلفة
+function formatInternationalPhoneNumber(phoneNumber) {
+  if (!phoneNumber) return '';
+  
+  let cleanNumber = phoneNumber.toString().replace(/\D/g, '');
+  
+  // إزالة أي أصفار في البداية
+  if (cleanNumber.startsWith('0')) {
+    cleanNumber = cleanNumber.substring(1);
+  }
+  
+  // التحقق من الدول الشائعة
+  const countryPatterns = {
+    'EG': /^2\d{10}$/, // مصر
+    'SA': /^966\d{9}$/, // السعودية
+    'AE': /^971\d{9}$/, // الإمارات
+    'QA': /^974\d{8}$/, // قطر
+    'KW': /^965\d{8}$/, // الكويت
+    'BH': /^973\d{8}$/, // البحرين
+    'OM': /^968\d{8}$/, // عمان
+    'JO': /^962\d{9}$/, // الأردن
+    'LB': /^961\d{8}$/, // لبنان
+    'SY': /^963\d{9}$/, // سوريا
+    'IQ': /^964\d{10}$/, // العراق
+    'YE': /^967\d{9}$/, // اليمن
+    'SD': /^249\d{9}$/, // السودان
+    'DZ': /^213\d{9}$/, // الجزائر
+    'MA': /^212\d{9}$/, // المغرب
+    'TN': /^216\d{8}$/, // تونس
+    'LY': /^218\d{9}$/, // ليبيا
+  };
+  
+  // إذا كان الرقم يبدأ بـ +، نزيله
+  if (phoneNumber.startsWith('+')) {
+    cleanNumber = phoneNumber.substring(1).replace(/\D/g, '');
+  }
+  
+  return cleanNumber;
+}
+
+// تحديث دالة createNewChat
+function createNewChat() {
+  var phoneInput = document.getElementById("new-chat-number");
+  var phoneNumber = phoneInput.value.trim();
+  
+  if (!phoneNumber) {
+    showNotification("أدخل رقم الهاتف أولاً", "warning");
+    phoneInput.focus();
+    return;
+  }
+  
+  // استخدام الدالة الجديدة لتنظيف الرقم
+  var cleanNumber = formatInternationalPhoneNumber(phoneNumber);
+  
+  if (cleanNumber.length < 10) {
+    showNotification("رقم الهاتف غير صالح. يجب أن يكون 10 أرقام على الأقل", "error");
+    phoneInput.focus();
+    return;
+  }
+  
+  console.log("📞 محاولة بدء محادثة مع الرقم الدولي:", cleanNumber);
+  
+  socket.emit("start_new_chat", cleanNumber);
+  
+  closeNewChat();
+  showNotification("جارٍ بدء المحادثة...", "info");
+  
+  // إضافة مؤشر تحميل
+  showLoading(true);
+}
