@@ -1,13 +1,14 @@
 {
   "name": "zzapp",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
     "build": "echo 'No build step required'",
     "test": "echo 'No tests specified'",
-    "fix-db": "node fix-database.js"
+    "fix-db": "node fix-database.js",
+    "sync-chats": "curl -X POST http://localhost:3000/sync-chats/session_id"
   },
   "dependencies": {
     "express": "^4.18.2",
