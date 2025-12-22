@@ -170,7 +170,6 @@ socket.on("sync_complete", function(data) {
 function addSyncButton() {
   var chatsActions = document.querySelector('.chats-actions');
   if (chatsActions) {
-    // التحقق من عدم وجود الزر مسبقاً
     if (!chatsActions.querySelector('.sync-chats-btn')) {
       var syncBtn = document.createElement('button');
       syncBtn.className = 'chats-icon-btn sync-chats-btn';
@@ -185,7 +184,6 @@ function addSyncButton() {
         }
       };
       
-      // إضافة الزر بجانب زر تحديث المحادثات
       var refreshBtn = chatsActions.querySelector('.chats-icon-btn[onclick="refreshChats()"]');
       if (refreshBtn) {
         chatsActions.insertBefore(syncBtn, refreshBtn.nextSibling);
@@ -321,7 +319,7 @@ function showChats(chats) {
   });
 }
 
-// إضافة عنصر محادثة
+// إضافة عنصر محادثة - محسّن لتصحيح اتجاه الأرقام
 function addChatItem(chat) {
   var container = document.getElementById("chats-list");
   
@@ -343,10 +341,12 @@ function addChatItem(chat) {
   var displayName = chat.display_name || chat.name || chat.number || "مستخدم";
   var displayInfo = displayName;
   
+  // تصحيح اتجاه الأرقام في عرض الاسم والرقم
   if (chat.about && chat.about.trim() !== "") {
     displayInfo = `${displayName}<br><small class="chat-about">${chat.about}</small>`;
   } else if (chat.number && displayName !== chat.number && chat.number !== "جهة اتصال" && chat.number !== "مجموعة") {
-    displayInfo = `${displayName}<br><small class="chat-number">${chat.number}</small>`;
+    // رقم الهاتف يعرض بشكل صحيح (من اليسار لليمين)
+    displayInfo = `${displayName}<br><small class="chat-number ltr-number">${formatPhoneNumber(chat.number)}</small>`;
   }
   
   div.innerHTML = `
@@ -358,7 +358,7 @@ function addChatItem(chat) {
     <div class="chat-info">
       <div class="chat-header">
         <div class="chat-name">${displayInfo}</div>
-        <div class="chat-time">${time}</div>
+        <div class="chat-time ltr-number">${time}</div>
       </div>
       <div class="chat-preview">
         <div class="chat-last">${lastMsg}</div>
@@ -441,7 +441,7 @@ function getInitials(name) {
   return cleanName.charAt(0).toUpperCase();
 }
 
-// تنسيق الوقت
+// تنسيق الوقت - مع تصحيح اتجاه الأرقام
 function formatTime(dateString) {
   try {
     if (!dateString) return "";
@@ -461,19 +461,38 @@ function formatTime(dateString) {
       var ampm = hours >= 12 ? "م" : "ص";
       hours = hours % 12;
       hours = hours ? hours : 12;
-      return hours + ":" + (minutes < 10 ? '0' : '') + minutes + " " + ampm;
+      // استخدام صيغة رقمية ثابتة (من اليسار لليمين)
+      return (hours < 10 ? '0' : '') + hours + ":" + (minutes < 10 ? '0' : '') + minutes;
     } else if (diffDays === 1) {
       return "أمس";
     } else if (diffDays < 7) {
       var days = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
       return days[date.getDay()];
     } else {
+      // صيغة رقمية ثابتة (من اليسار لليمين)
       return date.getDate() + "/" + (date.getMonth() + 1) + "/" + date.getFullYear().toString().substr(-2);
     }
   } catch (e) {
     console.error("خطأ في تنسيق الوقت:", e);
     return "الآن";
   }
+}
+
+// تنسيق رقم الهاتف بشكل صحيح
+function formatPhoneNumber(number) {
+  if (!number) return "";
+  
+  // إزالة جميع الأحرف غير الرقمية
+  var cleanNumber = number.toString().replace(/\D/g, '');
+  
+  // تنسيق الرقم مع مسافات لسهولة القراءة
+  if (cleanNumber.length === 11) {
+    return cleanNumber.replace(/(\d{2})(\d{4})(\d{4})/, '$1 $2 $3');
+  } else if (cleanNumber.length === 10) {
+    return cleanNumber.replace(/(\d{4})(\d{3})(\d{3})/, '$1 $2 $3');
+  }
+  
+  return cleanNumber;
 }
 
 // فتح محادثة
@@ -492,7 +511,7 @@ function openChat(chat) {
   } else if (chat.is_group) {
     statusText = "مجموعة";
   } else if (chat.number && chat.number !== "جهة اتصال") {
-    statusText = chat.number;
+    statusText = formatPhoneNumber(chat.number);
   } else {
     statusText = "مستقبل الرسائل";
   }
@@ -602,7 +621,7 @@ function formatDateHeader(dateString) {
   }
 }
 
-// عرض رسالة
+// عرض رسالة - محسّنة لتصحيح اتجاه الأرقام
 function showMessage(data, isSelf) {
   var container = document.getElementById("messages-container");
   var div = document.createElement("div");
@@ -616,7 +635,8 @@ function showMessage(data, isSelf) {
     var displayName = data.sender_name;
     if (data.sender_number && data.sender_name !== data.sender_number && 
         data.sender_number !== "جهة اتصال" && data.sender_number !== "مجموعة") {
-      displayName = `${data.sender_name}<br><small>${data.sender_number}</small>`;
+      // رقم الهاتف يعرض بشكل صحيح (من اليسار لليمين)
+      displayName = `${data.sender_name}<br><small class="message-number ltr-number">${formatPhoneNumber(data.sender_number)}</small>`;
     }
     
     content += '<div class="sender-name">' + displayName + '</div>';
@@ -646,7 +666,7 @@ function showMessage(data, isSelf) {
   }
   
   content += '<div class="message-meta">';
-  content += '<div class="message-time">' + time + '</div>';
+  content += '<div class="message-time ltr-number">' + time + '</div>';
   if (isSelf) {
     var statusIcon = '✓';
     if (data.read_receipt) {
@@ -1052,10 +1072,12 @@ function addToEmojiHistory(emoji) {
   localStorage.setItem('emojiHistory', JSON.stringify(emojiHistory));
 }
 
-// محادثة جديدة
+// محادثة جديدة - محسنة لمعالجة الأرقام بشكل صحيح
 function showNewChat() {
   document.getElementById("new-chat-modal").style.display = "flex";
-  document.getElementById("new-chat-number").focus();
+  var input = document.getElementById("new-chat-number");
+  input.value = "";
+  input.focus();
 }
 
 function closeNewChat() {
@@ -1073,22 +1095,36 @@ function createNewChat() {
     return;
   }
   
+  // تنظيف الرقم (إزالة جميع الأحرف غير الرقمية)
   phoneNumber = phoneNumber.replace(/\D/g, '');
   
   if (phoneNumber.length < 10) {
-    showNotification("رقم الهاتف غير صالح", "error");
+    showNotification("رقم الهاتف غير صالح. يجب أن يكون 10 أرقام على الأقل", "error");
     phoneInput.focus();
     return;
   }
   
+  // إضافة رمز الدولة للمصرية (2) إذا لم يكن موجوداً
   if (phoneNumber.length === 10 && !phoneNumber.startsWith('2')) {
     phoneNumber = '2' + phoneNumber;
   }
+  
+  // التحقق من صحة الرقم
+  if (!/^2\d{10}$/.test(phoneNumber)) {
+    showNotification("رقم الهاتف غير صالح. يجب أن يبدأ بـ 2 ثم 10 أرقام", "error");
+    phoneInput.focus();
+    return;
+  }
+  
+  console.log("📞 محاولة بدء محادثة مع الرقم:", phoneNumber);
   
   socket.emit("start_new_chat", phoneNumber);
   
   closeNewChat();
   showNotification("جارٍ بدء المحادثة...", "info");
+  
+  // إضافة مؤشر تحميل
+  showLoading(true);
 }
 
 // مزامنة المحادثات من واتساب
